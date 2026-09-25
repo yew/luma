@@ -1,0 +1,6 @@
+{
+  "identifier": "main-window",
+  "description": "Minimal desktop window access",
+  "windows": ["main"],
+  "permissions": ["core:default", "core:window:allow-start-dragging"]
+}
