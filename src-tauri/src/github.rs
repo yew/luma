@@ -107,8 +107,44 @@ struct DeviceSession {
     interval: u64,
     next_poll: Instant,
 }
+// Only serialized into the OS credential store; never exposed via commands.
+#[derive(Clone, Serialize, Deserialize)]
+struct StoredToken {
+    access_token: String,
+    expires_at: Option<u64>,
+}
+fn restore_token(value: &str) -> Result<StoredToken, GitHubError> {
+    if value.starts_with('{') {
+        let token: StoredToken = serde_json::from_str(value).map_err(|_| GitHubError::storage())?;
+        if token.access_token.is_empty() {
+            return Err(GitHubError::storage());
+        }
+        Ok(token)
+    } else {
+        Ok(StoredToken {
+            access_token: value.to_owned(),
+            expires_at: None,
+        })
+    }
+}
+fn token_expiration(raw: &serde_json::Value, now: u64) -> Result<Option<u64>, GitHubError> {
+    match raw.get("expires_in") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => {
+            let seconds = value.as_u64().ok_or_else(GitHubError::schema)?;
+            // Zero does not establish a positive lifetime; rely on server validation.
+            if seconds == 0 {
+                return Ok(None);
+            }
+            let duration = seconds.checked_mul(1000).ok_or_else(GitHubError::schema)?;
+            Ok(Some(
+                now.checked_add(duration).ok_or_else(GitHubError::schema)?,
+            ))
+        }
+    }
+}
 struct Inner {
-    token: Option<String>,
+    token: Option<StoredToken>,
     loaded: bool,
     account: Option<Account>,
     snapshot: Option<CopilotSnapshot>,
@@ -271,7 +307,7 @@ impl GitHubService {
             } else {
                 inner.loaded = true;
                 match credential().and_then(|entry| match entry.get_password() {
-                    Ok(token) if !token.is_empty() => Ok(Some(token)),
+                    Ok(token) if !token.is_empty() => restore_token(&token).map(Some),
                     Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
                     Err(_) => Err(GitHubError::storage()),
                 }) {
@@ -456,7 +492,7 @@ impl GitHubService {
         let result = async {
             let token = parse_token(&raw)?;
             let (account, snapshot) = self
-                .validate(&token, &mut cancel)
+                .validate(&token.access_token, &mut cancel)
                 .await
                 .map_err(post_exchange_error)?;
             Ok::<_, GitHubError>((token, account, snapshot))
@@ -478,7 +514,7 @@ impl GitHubService {
         // Serialize credential mutation with disconnect so late responses cannot restore a deleted token.
         if let Err(error) = credential().and_then(|entry| {
             entry
-                .set_password(&token)
+                .set_password(&serde_json::to_string(&token).map_err(|_| GitHubError::storage())?)
                 .map_err(|_| GitHubError::storage())
         }) {
             inner.error = Some(error.clone());
@@ -523,6 +559,19 @@ impl GitHubService {
                 ));
             }
             match inner.token.as_ref() {
+                Some(token)
+                    if token
+                        .expires_at
+                        .is_some_and(|deadline| epoch_millis() >= deadline) =>
+                {
+                    let error = GitHubError::new(
+                        "reauth_required",
+                        "GitHub authorization expired. Reconnect GitHub.",
+                    );
+                    inner.busy = false;
+                    inner.error = Some(error.clone());
+                    return Err(error);
+                }
                 Some(token) => token.clone(),
                 None => {
                     inner.busy = false;
@@ -530,7 +579,7 @@ impl GitHubService {
                 }
             }
         };
-        let result = self.validate(&token, &mut cancel).await;
+        let result = self.validate(&token.access_token, &mut cancel).await;
         let mut inner = self.inner.lock().await;
         if generation != inner.generation {
             return Err(GitHubError::cancelled());
@@ -691,13 +740,10 @@ fn oauth_error(code: &str) -> GitHubError {
         _ => GitHubError::new("oauth", "GitHub could not complete device authorization."),
     }
 }
-fn parse_token(raw: &serde_json::Value) -> Result<String, GitHubError> {
-    // Only non-expiring OAuth bearer tokens have been validated for this integration.
-    if raw.get("expires_in").is_some_and(|v| !v.is_null())
-        || raw.get("refresh_token").is_some_and(|v| !v.is_null())
-    {
-        return Err(GitHubError::new("unsupported_token", "GitHub returned an unsupported token lifecycle. Reconnect with Luma's validated OAuth configuration."));
-    }
+fn parse_token(raw: &serde_json::Value) -> Result<StoredToken, GitHubError> {
+    // Extra lifecycle fields do not invalidate a usable OAuth access token.
+    // Reauthentication on HTTP 401 remains the supported expiry/revocation path.
+    // Refresh tokens are deliberately neither persisted nor used.
     if !raw
         .get("token_type")
         .and_then(|v| v.as_str())
@@ -715,11 +761,16 @@ fn parse_token(raw: &serde_json::Value) -> Result<String, GitHubError> {
             "GitHub returned permissions beyond Luma's validated empty scope request.",
         ));
     }
-    raw.get("access_token")
+    let access_token = raw
+        .get("access_token")
         .and_then(|v| v.as_str())
         .filter(|v| !v.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(GitHubError::schema)
+        .ok_or_else(GitHubError::schema)?
+        .to_owned();
+    Ok(StoredToken {
+        access_token,
+        expires_at: token_expiration(raw, epoch_millis())?,
+    })
 }
 fn project_copilot(
     raw: serde_json::Value,
@@ -880,12 +931,16 @@ mod tests {
         );
         assert_eq!(
             parse_token(&json!({"access_token":"test-only","token_type":"bearer","scope":"repo"}))
-                .unwrap_err()
+                .err()
+                .unwrap()
                 .code,
             "unexpected_scope"
         );
         assert!(parse_token(&json!({"access_token":"test-only","token_type":"unknown"})).is_err());
-        assert_eq!(parse_token(&json!({"access_token":"test-only","token_type":"bearer","scope":"","expires_in":3600})).unwrap_err().code, "unsupported_token");
+        assert!(parse_token(
+            &json!({"access_token":"test-only","token_type":"bearer","scope":"","expires_in":3600})
+        )
+        .is_ok());
     }
     #[test]
     fn poll_delay_rounds_up_and_terminal_oauth_errors_are_distinct() {
@@ -962,5 +1017,47 @@ mod tests {
         assert_eq!(classify_http(403, None, Some(60)).retry_after, Some(60));
         assert_eq!(classify_http(429, None, None).code, "rate_limited");
         assert_eq!(classify_http(500, None, None).code, "http");
+    }
+    #[test]
+    fn lifecycle_metadata_accepts_usable_tokens_without_persisting_refresh_secrets() {
+        for extra in [
+            json!({}),
+            json!({"expires_in": null}),
+            json!({"expires_in": 0}),
+            json!({"expires_in": 3600, "refresh_token": "refresh-secret", "refresh_token_expires_in": 7200}),
+        ] {
+            let mut raw = json!({"access_token":"access-secret","token_type":"bearer","scope":""});
+            raw.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let token = parse_token(&raw).unwrap();
+            let saved = serde_json::to_string(&token).unwrap();
+            assert!(!saved.contains("refresh-secret"));
+            let restored = restore_token(&saved).unwrap();
+            assert_eq!(restored.access_token, "access-secret");
+            assert_eq!(restored.expires_at, token.expires_at);
+        }
+        assert_eq!(
+            restore_token("legacy-token").unwrap().access_token,
+            "legacy-token"
+        );
+        assert_eq!(
+            token_expiration(&json!({"expires_in": 3600}), 1000).unwrap(),
+            Some(3601000)
+        );
+        assert!(token_expiration(&json!({"expires_in": -1}), 0).is_err());
+        assert!(token_expiration(&json!({"expires_in": "invalid"}), 0).is_err());
+        assert!(token_expiration(&json!({"expires_in": u64::MAX}), 0).is_err());
+    }
+    #[tokio::test]
+    async fn expired_saved_token_requires_reconnect_before_network_access() {
+        let service = GitHubService::new().unwrap();
+        service.inner.lock().await.token = Some(StoredToken {
+            access_token: "test-only".into(),
+            expires_at: Some(1),
+        });
+        assert_eq!(service.refresh().await.unwrap_err().code, "reauth_required");
+        assert_eq!(service.inner.lock().await.status().state, "reauth_required");
+        assert!(!service.inner.lock().await.busy);
     }
 }
