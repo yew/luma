@@ -19,4 +19,12 @@ The tested account has an enterprise Copilot plan. The premium-interactions resp
 
 No GitHub CLI, external app identity, client secret, or additional OAuth scope was used. Keep the initial scope list empty; broader permissions are not justified by this result. The diagnostic token was held only in process memory, never printed or saved, and the temporary device-code file was removed after exchange. The process then exited without retaining the token. This does not revoke the GitHub application grant; the production application will need a new sign-in and secure OS token storage.
 
-Sanitized HTTP-status evidence is stored in the local harness runtime directory. Production Rust authentication, token lifecycle, secure storage, and the first local-agent integration remain unimplemented; this result completes only the provider authentication feasibility check, not all of P0.
+Sanitized HTTP-status evidence is stored in the local harness runtime directory. This probe completed only provider authentication feasibility, not all of P0. The subsequent Rust implementation and remaining validation are described below.
+
+## Native Implementation
+
+The Rust backend now implements device authorization, interval/expiry enforcement, cancellation generations, minimum-scope validation, identity-checked Copilot projection, OS credential-store persistence/restoration/deletion, bounded HTTPS with redirects disabled, refresh cooldown/backoff, and explicit failure categories. The frontend exposes connect, browser verification, cancel, refresh, retry, and disconnect. Tokens and device codes remain backend-only.
+
+The currently validated non-expiring OAuth token type is supported. Responses introducing expiry or refresh-token semantics are rejected explicitly until that lifecycle is implemented; no undocumented refresh is attempted. The app does not depend on GitHub CLI or jq. Historical storage is not yet implemented; current snapshots are in memory.
+
+Native Rust tests and compilation pass on macOS. A real new login through the desktop UI, secure-store interaction/restart recovery, network-failure UI, and Windows execution remain to be tested. The earlier device-flow probe's token was intentionally not retained, so the desktop requires its own sign-in.

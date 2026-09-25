@@ -31,9 +31,9 @@ This is a pre-implementation plan. The workspace was empty when planning began; 
 
 ### Current Implementation Status
 
-- Native GitHub OAuth feasibility passed with Luma's own client ID, no additional scopes, and HTTP 200 from identity and Copilot endpoints; see `docs/integrations/github-auth.md`. Production authentication and secure token storage remain pending.
+- Native GitHub OAuth feasibility passed with Luma's own client ID, no additional scopes, and HTTP 200 from identity and Copilot endpoints; see `docs/integrations/github-auth.md`. Native device authorization, keychain/credential-manager storage, direct Copilot requests, and a sign-in UI are implemented; production end-to-end sign-in and Windows validation remain pending.
 - Codex start/completion/failure metadata can be inspected without retaining message content. Existing desktop waiting-state observation is unresolved: no supported listener was found on its owning App Server. See `docs/integrations/codex.md`; AC1 and Step 1 remain incomplete.
-- Independent desktop foundation work provides a React demo/disconnected UI and a Tauri tray/window scaffold. Frontend build and five focused diagnostic tests pass. Native compilation, actual window behavior, persistent settings, and Windows validation remain pending; Step 2 is not complete.
+- Independent desktop foundation work provides a React demo/disconnected UI and a Tauri tray/window scaffold. Frontend build and five focused diagnostic tests pass. Proxy-assisted Rust installation and native macOS compilation now pass. A running 360 × 480 Luma window at the floating window layer was observed. Full window/tray interaction checks, persistent settings, and Windows validation remain pending; Step 2 is not complete.
 
 ### Delivery Estimates
 

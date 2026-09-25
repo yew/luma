@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { GitHubUsage } from './GitHubUsage';
 import { isTauri, invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
@@ -34,15 +35,17 @@ export function App() {
     {settings && <section className="settings" aria-label="Settings">
       <label><input type="checkbox" checked={demo} onChange={e => setDemo(e.target.checked)} /> Show demo data</label>
       <label><input type="checkbox" checked={hideTitles} onChange={e => setHideTitles(e.target.checked)} /> Hide session titles</label>
-      <p>Preview settings apply to this window only. Live connections are not configured.</p>
+      <p>Display settings apply to this window only. GitHub credentials use system secure storage.</p>
     </section>}
     {demo && <p className="demo-note">Demo data · not live usage or session activity</p>}
     {collapsed ? <section className="summary" aria-label="Activity summary">
       <span><b>{demo ? '1' : '—'}</b> waiting</span><span><b>{demo ? '1' : '—'}</b> running</span><span><b>{demo ? '36.1%' : '—'}</b> used</span>
-    </section> : <>
+    </section> : null}
+    <div hidden={collapsed}>
       <section aria-labelledby="usage-title">
-        <div className="section-heading"><h2 id="usage-title">AI USAGE</h2><span>{demo ? '1 provider' : 'Not connected'}</span></div>
-        <article className="usage-card">
+        <div className="section-heading"><h2 id="usage-title">AI USAGE</h2><span>{demo ? '1 provider' : 'GitHub'}</span></div>
+        <div hidden={demo}><GitHubUsage /></div>
+        {demo && <article className="usage-card">
           <div className="provider-row"><div className="provider-icon">⌘</div><div><h3>GitHub Copilot</h3><span className="muted">{demo ? 'Enterprise · premium quota' : 'Premium quota'}</span></div><span className="chip">{demo ? 'Demo' : 'Offline'}</span></div>
           {demo ? <>
             <div className="amount"><strong>36.1<span>%</span></strong><span className="muted">used</span></div>
@@ -50,7 +53,7 @@ export function App() {
             <div className="quota-detail"><span>722,342 / 2,000,000 credits</span><span>63.8% remaining*</span></div>
             <p className="footnote">Resets Oct 1, 2026 · *Reported by provider</p>
           </> : <div className="empty"><p>Your usage, at a glance.</p><p className="muted">Connect GitHub when native sign-in is available.</p></div>}
-        </article>
+        </article>}
       </section>
       <section aria-labelledby="sessions-title">
         <div className="section-heading"><h2 id="sessions-title">CONVERSATIONS</h2><span>Codex</span></div>
@@ -58,7 +61,7 @@ export function App() {
           <span className={`status-icon status-${index}`} aria-hidden="true">{s.symbol}</span><div className="session-info"><h3>{hideTitles ? `Session ${index + 1}` : s.title}</h3><p>{hideTitles ? 'Hidden project' : s.project} <span>· {s.status}</span></p></div>
         </li>)}</ul> : <div className="empty session-empty"><span className="empty-icon">◎</span><p>No live session connection</p><p className="muted">Waiting-state detection is under validation.</p></div>}
       </section>
-    </>}
-    <footer><span><i />{demo ? 'Demo preview' : 'Connections unavailable'}</span><button className="text-button" onClick={() => setDemo(!demo)}>{demo ? 'Exit demo' : 'Preview demo'}</button></footer>
+    </div>
+    <footer><span><i />{demo ? 'Demo preview' : 'Local dashboard'}</span><button className="text-button" onClick={() => setDemo(!demo)}>{demo ? 'Exit demo' : 'Preview demo'}</button></footer>
   </main>;
 }

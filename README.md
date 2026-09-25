@@ -4,7 +4,7 @@ A local desktop dashboard for AI usage and agent activity, built with Tauri 2, R
 
 ## Current Status
 
-The desktop scaffold contains an explicitly labeled demo preview and disconnected states. It does not yet connect to GitHub or display live Codex sessions. Native OAuth feasibility has been verified separately with Luma's own client ID and no extra scopes. Existing Codex desktop waiting-state observation remains unresolved; see [the integration findings](docs/integrations/codex.md).
+The desktop scaffold contains an explicitly labeled demo preview and disconnected states. The native app now includes GitHub device sign-in, secure credential storage, and direct Copilot usage requests. Browser preview cannot invoke native authentication, and live Codex sessions are not connected. Native OAuth feasibility has been verified separately with Luma's own client ID and no extra scopes. Existing Codex desktop waiting-state observation remains unresolved; see [the integration findings](docs/integrations/codex.md).
 
 ## Development
 
@@ -18,7 +18,7 @@ npm test
 npm run tauri -- dev
 ```
 
-The browser preview runs at http://127.0.0.1:1420. The desktop scaffold adds a tray with Show and Quit, close-to-tray behavior, and an always-on-top toggle. Window-position persistence, native authentication, usage storage, live session integration, launch at login, signing, and platform validation are pending.
+The browser preview runs at http://127.0.0.1:1420. The desktop scaffold adds a tray with Show and Quit, close-to-tray behavior, and an always-on-top toggle. Native GitHub sign-in uses the system browser and OS credential store. Window-position persistence, usage history storage, live session integration, launch at login, signing, and full platform validation are pending.
 
 ## Codex Metadata Diagnostic
 
@@ -38,4 +38,17 @@ The approved implementation plan is [Luma Desktop Dashboard MVP](docs/plans/acti
 
 ## Validation So Far
 
-Frontend type checking and production bundling pass. Five focused metadata-parser tests pass, and a real local session was inspected with aggregate-only output. The Tauri configuration is recognized by its CLI. Native compilation and real window/tray behavior are not yet verified: the host initially had no Rust toolchain, and a local-only installation attempt was stopped after a slow download; partial files remain under `.local/harness/toolchains/`. No global PATH or shell startup files were changed. Windows validation is pending.
+Frontend type checking and production bundling pass. Five focused metadata-parser tests pass, and a real local session was inspected with aggregate-only output. The Tauri configuration is recognized by its CLI. Using the user-provided vpn proxy completed the repository-local Rust installation. Native compilation passes, and a macOS Luma process with a visible window was confirmed. Complete window/tray interactions and the new native sign-in UI still require end-to-end validation. No global PATH or shell startup files were changed. Windows validation is pending.
+
+## Repository-local Rust Toolchain
+
+For this checkout, select the local toolchain without changing global shell configuration:
+
+```bash
+export CARGO_HOME="$PWD/.local/harness/toolchains/cargo"
+export RUSTUP_HOME="$PWD/.local/harness/toolchains/rustup"
+export PATH="$CARGO_HOME/bin:$PATH"
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+The user's `vpn` alias can be enabled in an interactive shell for downloads. Keep localhost out of the proxy (`no_proxy=127.0.0.1,localhost`) when running the development app. Proxy addresses and shell setup are user environment details, not application requirements.

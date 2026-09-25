@@ -49,3 +49,7 @@ Three recent session files confirmed start/end events without a waiting/approval
 The development diagnostic in `tools/inspect-codex-events.mjs` projects only turn ID, timestamp, event type, and normalized status internally; output contains aggregate counts and last recorded status only. It never promotes file silence to live status. Tests cover content stripping, explicit start/end transitions, stale/duplicate events, old-run completions, malformed input, and terminal evidence without a captured start. Production incremental reading, live observation, and waiting/resume validation remain pending.
 
 P0 cannot yet satisfy waiting-state acceptance for existing desktop conversations. The approved plan allows independent desktop foundation work while this dependency remains unresolved; neither P0 nor the full MVP is marked complete.
+
+## Official Documentation Recheck
+
+The user's local proxy made the official App Server documentation accessible on 2026-09-26: https://developers.openai.com/codex/app-server. The fetched page confirms `thread/read` is a read without resuming and returns runtime status, and `thread/status/changed` exposes active waiting flags. It does not establish a public observer endpoint for the currently running desktop process. The native transport availability gap therefore remains; no private IPC connection or task takeover was attempted.
