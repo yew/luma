@@ -1,5 +1,6 @@
 # Disposable harness state and private local probes
 .local/
+.DS_Store
 node_modules/
 dist/
 src-tauri/target/
