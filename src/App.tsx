@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { GitHubUsage, type Auth } from './GitHubUsage';
-import { Settings, type Preferences } from './Settings';
+import { Settings, defaultPreferences, type Preferences } from './Settings';
 import { HistorySettings } from './HistorySettings';
 import { listen } from '@tauri-apps/api/event';
 import { isTauri, invoke } from '@tauri-apps/api/core';
@@ -14,7 +14,7 @@ const samples = [
 
 export function App() {
   const [demo, setDemo] = useState(false);
-  const [preferences, setPreferences] = useState<Preferences>({ refresh_interval_secs: 300, launch_at_login: false, hide_titles: false, hide_paths: false, pinned: true, collapsed: false });
+  const [preferences, setPreferences] = useState<Preferences>(defaultPreferences);
   const [auth, setAuth] = useState<Auth | null>(null);
   const { collapsed, pinned, hide_titles: hideTitles, hide_paths: hidePaths } = preferences;
   const [settings, setSettings] = useState(false);

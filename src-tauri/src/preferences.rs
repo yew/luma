@@ -17,6 +17,7 @@ pub struct Preferences {
     pub hide_paths: bool,
     pub pinned: bool,
     pub collapsed: bool,
+    pub proxy: crate::network::ProxySettings,
 }
 
 impl Default for Preferences {
@@ -28,6 +29,7 @@ impl Default for Preferences {
             hide_paths: false,
             pinned: true,
             collapsed: false,
+            proxy: crate::network::ProxySettings::default(),
         }
     }
 }
@@ -41,6 +43,7 @@ pub struct PreferencesPatch {
     pub hide_paths: Option<bool>,
     pub pinned: Option<bool>,
     pub collapsed: Option<bool>,
+    pub proxy: Option<crate::network::ProxySettings>,
 }
 
 impl Preferences {
@@ -66,6 +69,9 @@ impl Preferences {
         }
         if let Some(value) = patch.collapsed {
             next.collapsed = value;
+        }
+        if let Some(proxy) = &patch.proxy {
+            next.proxy = proxy.validated()?;
         }
         Ok(next)
     }
@@ -118,6 +124,7 @@ impl Store {
                 .map_err(|_| "Local preferences are invalid.")?,
             None => SavedPreferences::default(),
         };
+        saved.preferences.proxy.validated()?;
         saved.preferences.patched(&PreferencesPatch {
             refresh_interval_secs: Some(saved.preferences.refresh_interval_secs),
             ..Default::default()
@@ -212,6 +219,11 @@ pub async fn update_preferences(
     let _update = state.updates.lock().await;
     let previous = state.snapshot()?;
     let next = previous.patched(&patch)?;
+    let client = if next.proxy != previous.proxy {
+        Some(crate::network::build_client(&next.proxy)?)
+    } else {
+        None
+    };
     let window = app
         .get_webview_window("main")
         .ok_or("Luma's window is unavailable.")?;
@@ -233,7 +245,7 @@ pub async fn update_preferences(
             );
         }
     }
-    let saved = (|| {
+    let persist = || {
         let mut store = state
             .store
             .lock()
@@ -244,7 +256,13 @@ pub async fn update_preferences(
             return Err(error);
         }
         Ok(())
-    })();
+    };
+    let saved = if let Some(client) = client {
+        app.state::<crate::github::GitHubService>()
+            .replace_client(client, persist)
+    } else {
+        persist()
+    };
     if let Err(error) = saved {
         let _ = window.set_always_on_top(previous.pinned);
         if next.launch_at_login != previous.launch_at_login {
@@ -421,6 +439,45 @@ pub fn persist_window_event(window: &tauri::Window, event: &tauri::WindowEvent) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_defaults_migrate_and_updates_persist_without_clobbering_other_settings() {
+        let old: Preferences =
+            serde_json::from_str(r#"{"refresh_interval_secs":900,"hide_titles":true}"#).unwrap();
+        assert_eq!(old.proxy, crate::network::ProxySettings::default());
+        let next = old
+            .patched(&PreferencesPatch {
+                proxy: Some(crate::network::ProxySettings {
+                    mode: crate::network::ProxyMode::Http,
+                    server: " http://127.0.0.1:7890 ".into(),
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(next.proxy.server, "http://127.0.0.1:7890/");
+        assert!(next.hide_titles);
+        assert_eq!(next.refresh_interval_secs, 900);
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        store.saved.preferences = next.clone();
+        store.persist().unwrap();
+        let json: String = store
+            .connection
+            .query_row("SELECT value FROM preferences WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let restored: SavedPreferences = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.preferences, next);
+        assert!(next
+            .patched(&PreferencesPatch {
+                proxy: Some(crate::network::ProxySettings {
+                    mode: crate::network::ProxyMode::Http,
+                    server: "http://user:password@localhost:7890".into()
+                }),
+                ..Default::default()
+            })
+            .is_err());
+    }
 
     #[test]
     fn validates_refresh_without_changing_other_preferences() {

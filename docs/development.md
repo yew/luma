@@ -38,6 +38,16 @@ export PATH="$CARGO_HOME/bin:$PATH"
 
 The user's optional `vpn` command configures shell proxies for downloads. It is an environment convenience, not an application dependency. Use `no_proxy=127.0.0.1,localhost` when running the development app with a proxy.
 
+## HTTP Proxy
+
+Open Settings → Proxy, choose HTTP proxy, enter a server such as http://127.0.0.1:7890, and select Save proxy. Settings persist across restarts and apply to subsequent native GitHub device authorization, account validation, and Copilot requests. An in-flight request finishes using its original connection (bounded by the existing timeout). Existing refresh cooldown/backoff is preserved.
+
+Environment proxy preserves the HTTPS client's existing environment-variable proxy behavior (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY and NO_PROXY). OS proxy discovery is not enabled in this build. Direct connection explicitly disables automatic proxies. HTTP proxy explicitly selects the configured server; HTTPS origins use CONNECT and retain certificate verification. The system browser's GitHub verification page uses the browser's own network configuration.
+
+Proxy URLs support HTTP, DNS/IPv4/IPv6 hosts, and an optional port (default 80). Username/password authentication, URL paths, query strings, and fragments are unsupported and rejected; no proxy credentials enter preferences. Invalid settings are not saved, and a storage failure keeps the existing active client. Saving validates configuration rather than claiming connectivity. A failed connection preserves the last valid usage and never silently falls back to a direct request.
+
+Proxy validation: local HTTP CONNECT tests cover GitHub API and OAuth routing, and verify a failed settings save keeps the prior client. Preference tests cover legacy defaults and persistence. The full suite now passes 39 Rust tests and six Node tests, plus frontend build and strict clippy. Real proxy authentication is outside this feature.
+
 ## Checks
 
 ```bash

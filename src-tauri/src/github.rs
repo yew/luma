@@ -4,7 +4,7 @@ use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc,
+    Arc, RwLock,
 };
 static STATUS_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -191,7 +191,7 @@ impl Inner {
     }
 }
 pub struct GitHubService {
-    client: Client,
+    client: RwLock<Client>,
     storage: Arc<Storage>,
     client_id: String,
     inner: Mutex<Inner>,
@@ -212,7 +212,10 @@ fn seconds_until(deadline: Instant, now: Instant) -> u64 {
     remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0)
 }
 impl GitHubService {
-    pub fn new(storage: Arc<Storage>) -> Result<Self, GitHubError> {
+    pub fn new(
+        storage: Arc<Storage>,
+        proxy: &crate::network::ProxySettings,
+    ) -> Result<Self, GitHubError> {
         let config: OAuthConfig =
             serde_json::from_str(include_str!("../../config/github-oauth.json")).map_err(|_| {
                 GitHubError::new("configuration", "Invalid GitHub OAuth configuration.")
@@ -226,17 +229,12 @@ impl GitHubService {
                 "OAuth requires Luma's client ID, device flow, and the validated empty scope list.",
             ));
         }
-        let client = Client::builder()
-            .https_only(true)
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(25))
-            .user_agent("Luma/0.1.0")
-            .build()
-            .map_err(|_| GitHubError::new("network", "Cannot initialize HTTPS."))?;
+        let client = crate::network::build_client(proxy).map_err(|_| {
+            GitHubError::new("network", "Cannot initialize HTTPS or proxy configuration.")
+        })?;
         let (cancel, _) = watch::channel(0);
         Ok(Self {
-            client,
+            client: RwLock::new(client),
             storage,
             client_id: config.client_id,
             cancel,
@@ -254,6 +252,25 @@ impl GitHubService {
                 failures: 0,
             }),
         })
+    }
+    fn client(&self) -> Result<Client, GitHubError> {
+        self.client
+            .read()
+            .map(|client| client.clone())
+            .map_err(|_| GitHubError::new("network", "Cannot access network configuration."))
+    }
+    pub fn replace_client(
+        &self,
+        client: Client,
+        persist: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut active = self
+            .client
+            .write()
+            .map_err(|_| "Cannot update network configuration.".to_string())?;
+        persist()?;
+        *active = client;
+        Ok(())
     }
     fn persist(
         &self,
@@ -412,7 +429,7 @@ impl GitHubService {
     ) -> Result<(Account, CopilotSnapshot), GitHubError> {
         let raw = self
             .request(
-                self.client
+                self.client()?
                     .get("https://api.github.com/user")
                     .bearer_auth(token),
                 cancel,
@@ -424,7 +441,7 @@ impl GitHubService {
         }
         let raw = self
             .request(
-                self.client
+                self.client()?
                     .get("https://api.github.com/copilot_internal/user")
                     .bearer_auth(token),
                 cancel,
@@ -503,7 +520,7 @@ impl GitHubService {
         let result = async {
             let raw = self
                 .request(
-                    self.client
+                    self.client()?
                         .post("https://github.com/login/device/code")
                         .form(&[("client_id", self.client_id.as_str())]),
                     &mut cancel,
@@ -586,7 +603,7 @@ impl GitHubService {
         };
         let result = self
             .request(
-                self.client
+                self.client()?
                     .post("https://github.com/login/oauth/access_token")
                     .form(&[
                         ("client_id", self.client_id.as_str()),
@@ -1109,6 +1126,67 @@ mod tests {
             "quota_snapshots":{"premium_interactions":{"entitlement":2000000,"credits_used":722342,
             "quota_remaining":1277551.1,"percent_remaining":63.8,"overage_permitted":true}}})
     }
+    #[tokio::test]
+    async fn proxy_replacement_applies_to_oauth_and_preserves_old_client_on_save_failure() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let observed = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "Updated proxy was not used");
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("Test proxy: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            while !bytes.ends_with(b"\r\n\r\n") && bytes.len() < 8192 {
+                let mut byte = [0];
+                assert_eq!(stream.read(&mut byte).unwrap(), 1);
+                bytes.push(byte[0]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            String::from_utf8(bytes).unwrap()
+        });
+        let direct = crate::network::ProxySettings {
+            mode: crate::network::ProxyMode::Direct,
+            server: String::new(),
+        };
+        let service = GitHubService::new(Arc::new(Storage::in_memory().unwrap()), &direct).unwrap();
+        let configured = crate::network::ProxySettings {
+            mode: crate::network::ProxyMode::Http,
+            server: format!("http://{address}"),
+        };
+        service
+            .replace_client(
+                crate::network::build_client(&configured).unwrap(),
+                || Ok(()),
+            )
+            .unwrap();
+        assert!(service
+            .replace_client(crate::network::build_client(&direct).unwrap(), || Err(
+                "test storage failure".into()
+            ))
+            .is_err());
+        assert!(service.begin().await.is_err());
+        assert!(observed
+            .join()
+            .unwrap()
+            .starts_with("CONNECT github.com:443 HTTP/1.1"));
+        assert!(!service.inner.lock().await.busy);
+    }
+
     #[test]
     fn preserves_provider_values_and_calculates_independent_percentage() {
         let result = project_copilot(fixture(), &account(), 123).unwrap();
@@ -1166,7 +1244,11 @@ mod tests {
     }
     #[test]
     fn fresh_copilot_collections_preserve_exact_values_and_account_identity() {
-        let service = GitHubService::new(Arc::new(Storage::in_memory().unwrap())).unwrap();
+        let service = GitHubService::new(
+            Arc::new(Storage::in_memory().unwrap()),
+            &crate::network::ProxySettings::default(),
+        )
+        .unwrap();
         let raw: serde_json::Value = serde_json::from_str(r#"{"login":"yew","quota_snapshots":{"premium_interactions":{"entitlement":2000000,"credits_used":722342,"quota_remaining":1277551.100000000000000000001,"percent_remaining":63.8}}}"#).unwrap();
         let snapshot = project_copilot(raw, &account(), 100).unwrap();
         service.persist("one", 90, &account(), &snapshot).unwrap();
@@ -1213,7 +1295,11 @@ mod tests {
     }
     #[tokio::test]
     async fn cache_deletion_invalidates_inflight_collection_and_clears_both_projections() {
-        let service = GitHubService::new(Arc::new(Storage::in_memory().unwrap())).unwrap();
+        let service = GitHubService::new(
+            Arc::new(Storage::in_memory().unwrap()),
+            &crate::network::ProxySettings::default(),
+        )
+        .unwrap();
         let snapshot = project_copilot(fixture(), &account(), 100).unwrap();
         service
             .persist("before-clear", 90, &account(), &snapshot)
@@ -1284,7 +1370,11 @@ mod tests {
     }
     #[tokio::test]
     async fn cancellation_invalidates_inflight_epoch_and_clears_device() {
-        let service = GitHubService::new(Arc::new(Storage::in_memory().unwrap())).unwrap();
+        let service = GitHubService::new(
+            Arc::new(Storage::in_memory().unwrap()),
+            &crate::network::ProxySettings::default(),
+        )
+        .unwrap();
         let (generation, mut cancelled) = service.reserve().await.unwrap();
         service.cancel().await;
         assert!(cancelled.changed().await.is_ok());
@@ -1295,7 +1385,11 @@ mod tests {
     }
     #[tokio::test]
     async fn early_polls_do_not_reach_network_and_expired_sessions_stop() {
-        let service = GitHubService::new(Arc::new(Storage::in_memory().unwrap())).unwrap();
+        let service = GitHubService::new(
+            Arc::new(Storage::in_memory().unwrap()),
+            &crate::network::ProxySettings::default(),
+        )
+        .unwrap();
         {
             let mut inner = service.inner.lock().await;
             inner.device = Some(DeviceSession {
@@ -1314,7 +1408,11 @@ mod tests {
     }
     #[tokio::test]
     async fn cooldown_and_revocation_block_network_requests() {
-        let service = GitHubService::new(Arc::new(Storage::in_memory().unwrap())).unwrap();
+        let service = GitHubService::new(
+            Arc::new(Storage::in_memory().unwrap()),
+            &crate::network::ProxySettings::default(),
+        )
+        .unwrap();
         service.inner.lock().await.next_refresh = Some(Instant::now() + Duration::from_secs(30));
         assert_eq!(service.refresh().await.unwrap_err().code, "cooldown");
         {
@@ -1383,7 +1481,11 @@ mod tests {
     }
     #[tokio::test]
     async fn expired_saved_token_requires_reconnect_before_network_access() {
-        let service = GitHubService::new(Arc::new(Storage::in_memory().unwrap())).unwrap();
+        let service = GitHubService::new(
+            Arc::new(Storage::in_memory().unwrap()),
+            &crate::network::ProxySettings::default(),
+        )
+        .unwrap();
         service.inner.lock().await.token = Some(StoredToken {
             access_token: "test-only".into(),
             expires_at: Some(1),

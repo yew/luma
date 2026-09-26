@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { isTauri } from '@tauri-apps/api/core';
 import './Settings.css';
 
@@ -9,6 +9,7 @@ export type Preferences = {
   hide_paths: boolean;
   pinned: boolean;
   collapsed: boolean;
+  proxy: { mode: 'environment' | 'direct' | 'http'; server: string };
 };
 
 export const defaultPreferences: Preferences = {
@@ -18,6 +19,7 @@ export const defaultPreferences: Preferences = {
   hide_paths: false,
   pinned: true,
   collapsed: false,
+  proxy: { mode: 'environment', server: '' },
 };
 
 type SettingsProps = {
@@ -31,6 +33,19 @@ export function Settings({ preferences, onPreferencesChange, demo, onDemoChange 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const native = isTauri();
+  const [proxy, setProxy] = useState(preferences.proxy);
+  const [proxySaved, setProxySaved] = useState(false);
+  useEffect(() => { setProxy(preferences.proxy); }, [preferences.proxy.mode, preferences.proxy.server]);
+  async function saveProxy(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true); setError(''); setProxySaved(false);
+    try {
+      const savedProxy = proxy.mode === 'http' ? proxy : { ...proxy, server: preferences.proxy.server };
+      await onPreferencesChange({ proxy: savedProxy }); setProxySaved(true);
+    }
+    catch (failure) { setError(typeof failure === 'string' ? failure : 'Unable to save proxy settings.'); }
+    finally { setBusy(false); }
+  }
   async function change(patch: Partial<Preferences>) {
     setBusy(true);
     setError('');
@@ -60,6 +75,24 @@ export function Settings({ preferences, onPreferencesChange, demo, onDemoChange 
       <label><input type="checkbox" checked={preferences.hide_titles} onChange={event => void change({ hide_titles: event.target.checked })} /> Hide session titles</label>
       <label><input type="checkbox" checked={preferences.hide_paths} onChange={event => void change({ hide_paths: event.target.checked })} /> Hide project paths</label>
     </fieldset>
+    <form onSubmit={saveProxy} className="proxy-settings">
+      <fieldset disabled={busy || !native}>
+        <legend>Proxy</legend>
+        <label className="settings-select">Connection
+          <select value={proxy.mode} onChange={event => { setProxy({ ...proxy, mode: event.target.value as Preferences['proxy']['mode'] }); setProxySaved(false); }}>
+            <option value="environment">Environment proxy</option>
+            <option value="direct">Direct connection</option>
+            <option value="http">HTTP proxy</option>
+          </select>
+        </label>
+        {proxy.mode === 'http' && <label className="settings-select">Proxy server
+          <input type="url" required spellCheck={false} autoComplete="off" maxLength={2048} placeholder="http://127.0.0.1:7890" value={proxy.server} onChange={event => { setProxy({ ...proxy, server: event.target.value }); setProxySaved(false); }}/>
+        </label>}
+        <p>Applies to GitHub sign-in and usage requests. HTTP proxy URLs must not include a username or password.</p>
+        <button className="primary-button" type="submit">{busy ? 'Saving…' : 'Save proxy'}</button>
+        {proxySaved && <p role="status">Proxy saved. New requests use this connection; no restart needed.</p>}
+      </fieldset>
+    </form>
     <p>{native ? 'Preferences stay on this device. GitHub credentials use system secure storage.' : 'Persistent preferences are available in the desktop app.'}</p>
     {error && <p className="settings-error" role="alert">{error}</p>}
   </section>;

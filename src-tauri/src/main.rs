@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod github;
 mod history;
+mod network;
 mod preferences;
 mod storage;
 use std::sync::Arc;
@@ -51,9 +52,10 @@ fn main() {
             std::fs::create_dir_all(&data_dir)?;
             let storage = Arc::new(storage::Storage::open(data_dir.join("usage.sqlite3"))?);
             storage.prune(epoch_millis())?;
-            app.manage(github::GitHubService::new(storage.clone()).map_err(|e| e.message)?);
-            app.manage(storage);
             let preferences = preferences::PreferencesState::initialize(app.handle())?;
+            let proxy = preferences.snapshot()?.proxy;
+            app.manage(github::GitHubService::new(storage.clone(), &proxy).map_err(|e| e.message)?);
+            app.manage(storage);
             app.manage(preferences);
             preferences::restore_window(app.handle())?;
             let handle = app.handle().clone();
