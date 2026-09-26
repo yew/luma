@@ -53,7 +53,7 @@ Rust tests cover normalization, configuration merge/install/remove and malformed
 
 Validation currently passes 73 Rust tests, 24 UI component tests, eight Node tests, frontend build, strict clippy, and plan lint.
 
-These automated/synthetic checks do not establish that the current Codex desktop has loaded and trusted the handlers. Actual desktop hooks, Windows execution/stdin forwarding, and complete final-success/failure evidence remain unverified. AC1/AC6 are not marked complete from fixtures. The official reference is [Codex Hooks](https://developers.openai.com/codex/hooks); the installed protocol schema confirms all eight event names and command handler fields.
+These automated/synthetic checks do not establish that the current Codex desktop has loaded and trusted the handlers. The user subsequently verified real macOS Waiting and Turn stopped, with Waiting also observed through the installed database and Accessibility tree. See the macOS acceptance report. Windows is deferred; final-success/failure classification is outside the approved five-state MVP. AC1/AC6 are not marked complete from fixtures. The official reference is [Codex Hooks](https://developers.openai.com/codex/hooks); the installed protocol schema confirms all eight event names and command handler fields.
 
 ## Local Evidence
 

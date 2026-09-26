@@ -44,8 +44,8 @@ The user approved five states for this MVP: Running, Waiting for a request, Turn
 - Verified: native Copilot identity/quota access using Luma OAuth with empty scopes; exact decimals and allowance parsing; persistent immutable usage history, migrations, retention, account separation and deletion; retry deadlines, cache-only handling, and 5/5/5/15/30/60/120/300-second failure schedule. Current local validation passes 82 Rust tests, 25 component tests, eight Node tests, frontend build and strict clippy. The older 606-second device recovery is historical evidence, not evidence for the current short retry schedule.
 - Implemented: HTTP proxy settings; Codex Hooks receiver/install/disable/clear, conservative five-state session projection, ordered frontend subscriptions, and source-deletion reconciliation. Full real macOS running → waiting → resumed → stopped coverage and source-to-dashboard latency remain to be recorded.
 - Build evidence: GitHub Actions run https://github.com/yew/luma/actions/runs/36233920053 passed macOS Apple Silicon and Intel jobs (including DMG creation) at 71ccb94. Windows jobs also passed in that historical run but are outside this candidate. The current fast-retry candidate has a locally rebuilt DMG with verified integrity (hash in docs/validation.md); final publication/CI evidence remains pending. CI does not establish Intel physical-device validation.
-- Remaining installed-app checks: a new OAuth sign-in and disconnect/cache clearing through the packaged UI. Existing saved credentials and real polling are verified; fake-store/component tests cover failure cases and account isolation.
-- Remaining closeout: real Hooks acceptance, consistent final evidence, independent integrated review, archive, publication and current CI/sync evidence. Windows, canceled tests, signing credential acquisition and public distribution are outside this MVP. The unsigned package is not Gatekeeper-certified.
+- Installed-app checks passed: the user confirmed real Waiting → Turn stopped after responding, cache clearing, disconnect/new OAuth authorization, and restart restoration. Waiting was independently observed via the installed metadata projection and Accessibility UI; a later read confirmed a new process and fresh usage. The user confirmed Waiting and Turn stopped generally appeared within one second; this is functional observation, not an instrumented latency benchmark. Fake-store/component tests cover failure cases and account isolation.
+- Remaining closeout: independent integrated review, archive, publication and current CI/sync evidence. Windows, canceled tests, signing credential acquisition and public distribution are outside this MVP. The unsigned package is not Gatekeeper-certified.
 
 ### Delivery Estimates
 
@@ -259,15 +259,15 @@ Adapters parse raw data, domain handles metrics and session state, services mana
 
 ## Acceptance Criteria
 
-- [ ] AC1: Validate the specified Copilot GET /copilot_internal/user contract through native HTTPS using credentials authorized for Luma against a real response. P0 verifies the token type and minimum permissions independently of GitHub CLI. Integration documentation identifies the real account type, authorization method, supported usage metrics, selected agent/version, and capability limits. A real-account usage retrieval and real running/waiting/resume/stopped sequence have been validated; sanitized examples support repeatable checks. Unsupported required capabilities trigger scope steering rather than silent substitution.
+- [x] AC1: Validate the specified Copilot GET /copilot_internal/user contract through native HTTPS using credentials authorized for Luma against a real response. P0 verifies the token type and minimum permissions independently of GitHub CLI. Integration documentation identifies the real account type, authorization method, supported usage metrics, selected agent/version, and capability limits. A real-account usage retrieval and real running/waiting/resume/stopped sequence have been validated; sanitized examples support repeatable checks. Unsupported required capabilities trigger scope steering rather than silent substitution.
 - [x] AC2: Luma launches on macOS with a roughly 360 × 480 logical-pixel default window, resizing, dragging, an always-on-top toggle, collapsing, and restored window position. Closing hides to the tray, and tray Quit terminates the application. A disconnected monitor cannot leave the window inaccessible.
-- [ ] AC3: The dashboard shows provider usage and session metadata. Waiting-request sessions precede running sessions and recently stopped/canceled sessions. Collapsed mode shows waiting/running counts and one selected metric. Status uses text/icons as well as color; loading, disconnected, healthy, stale, insufficient-permission, request-failure, unsupported, and demo states are distinguishable and isolated per integration.
+- [x] AC3: The dashboard shows provider usage and session metadata. Waiting-request sessions precede running sessions and recently stopped/canceled sessions. Collapsed mode shows waiting/running counts and one selected metric. Status uses text/icons as well as color; loading, disconnected, healthy, stale, insufficient-permission, request-failure, unsupported, and demo states are distinguishable and isolated per integration.
 - [x] AC4: The live usage adapter supplies supported consumption, allowance, unit, period, reset time, and last-update fields. Percentages require matching metrics/units/periods and a positive limit; zero, unlimited, missing, and not-applicable allowances are distinct. Over-quota percentages may exceed 100% while bars are capped. Incompatible units are never summed. Copilot preserves fractional remaining quota and independently reported remaining percentages; the supplied sample computes to approximately 36.1% used without forcing agreement with reported remaining values.
 - [x] AC5: Usage refresh defaults to five minutes, respects provider limits/cache guidance, supports manual refresh with cooldown, and retries the first three failures after 5 seconds before backing off through 15, 30, 60, 120, and 300 seconds. Server-required waits take precedence, and success resets the failure streak. A failed refresh preserves the last successful snapshot and marks it stale instead of clearing usage.
-- [ ] AC6: The first agent maps available signals to Running, Waiting for a request, Turn stopped, Canceled, and Unknown. Resume returns to Running; Stop only means the turn reached its stop phase, not verified success. Waiting-request confidence limits are visible. Session/run identity and event deduplication prevent stale or out-of-order events from overwriting a newer run. Silence/process exit alone never imply completion; heartbeat expiry is used only when supported. Reconnection/restart restores or resynchronizes trustworthy state, otherwise showing Unknown.
-- [ ] AC7: Settings persist integrations, refresh interval, network proxy mode/server, launch-at-login preference, privacy options, and window preferences. Luma-managed secrets use macOS Keychain and do not enter frontend payloads, plaintext caches, fixtures, or logs. Users can disconnect integrations and clear caches. Logs redact secrets and sensitive paths. Copilot supports native sign-in, secure token storage, reauthentication, cancellation, disconnect, and account switching without an installed CLI or helper. OAuth client identity belongs to Luma and no client secret is embedded. Verify expiry/revocation, permission failures, and unavailable secure storage.
-- [ ] AC8: A documented support matrix names tested OS versions and CPU architectures. Automated builds and a locally installable macOS DMG are available. Installation/setup documentation and real-device checks cover macOS; sleep/wake, network recovery, resolution/monitor changes, and launch at login work. Signing/notarization configuration and required external credentials are documented; unsigned validation packages are clearly labeled, and no public-distribution readiness is claimed without actual signing validation.
-- [ ] AC9: Core logic and adapter parsing pass meaningful automated checks. Hook-driven updates typically appear within one second during functional validation.
+- [x] AC6: The first agent maps available signals to Running, Waiting for a request, Turn stopped, Canceled, and Unknown. Resume returns to Running; Stop only means the turn reached its stop phase, not verified success. Waiting-request confidence limits are visible. Session/run identity and event deduplication prevent stale or out-of-order events from overwriting a newer run. Silence/process exit alone never imply completion; heartbeat expiry is used only when supported. Reconnection/restart restores or resynchronizes trustworthy state, otherwise showing Unknown.
+- [x] AC7: Settings persist integrations, refresh interval, network proxy mode/server, launch-at-login preference, privacy options, and window preferences. Luma-managed secrets use macOS Keychain and do not enter frontend payloads, plaintext caches, fixtures, or logs. Users can disconnect integrations and clear caches. Logs redact secrets and sensitive paths. Copilot supports native sign-in, secure token storage, reauthentication, cancellation, disconnect, and account switching without an installed CLI or helper. OAuth client identity belongs to Luma and no client secret is embedded. Verify expiry/revocation, permission failures, and unavailable secure storage.
+- [x] AC8: A documented support matrix names tested OS versions and CPU architectures. Automated builds and a locally installable macOS DMG are available. Installation/setup documentation and real-device checks cover macOS; sleep/wake, network recovery, resolution/monitor changes, and launch at login work. Signing/notarization configuration and required external credentials are documented; unsigned validation packages are clearly labeled, and no public-distribution readiness is claimed without actual signing validation.
+- [x] AC9: Core logic and adapter parsing pass meaningful automated checks. Hook-driven updates typically appear within one second during functional validation.
 
 - [x] AC10: Successful usage polls append immutable, timestamped, account/metric-scoped observations with historical plan/allowance, precision, period/reset, and continuity metadata; latest-state projection remains consistent. Replayed collections are idempotent, unchanged new polls remain represented, and failed/cache-only polls never fabricate samples. Bounded time-range queries survive application restarts and schema migrations. Reset/decrease/gap and semantics changes cannot produce false consumption deltas. Default 90-day retention, configurable retention, history disablement, separate cache/history clearing, and per-account/global history deletion work without cross-account leakage.
 
@@ -294,35 +294,35 @@ Adapters parse raw data, domain handles metrics and session state, services mana
 
 ### Step 1: Validate live integration capabilities
 
-- Done: [ ]
+- Done: [x]
 - Outcome: A real usage source and one local agent have demonstrated the required signals, with account/version details, sanitized samples, authorization requirements, and explicit capability limits documented. Unresolved access or feasibility issues are surfaced before dependent integration work.
 - Covers: AC1
 - Check: Complete authorization with Luma credentials and retrieve Copilot usage through native HTTPS without gh installed, confirm account/metric semantics and raw-field mapping, and trigger an actual running → waiting → resumed → stopped agent sequence; compare observations with documented source semantics.
 
 ### Step 2: Establish the macOS desktop experience
 
-- Done: [ ]
+- Done: [x]
 - Outcome: The Tauri application provides the floating dashboard, tray lifecycle, collapsed view, settings foundation, and explicitly labeled demo states on macOS.
 - Covers: AC2, AC3, AC9
 - Check: Launch on macOS and verify window/tray interactions, session ordering, and empty/error/demo states.
 
 ### Step 3: Deliver native authentication and persistent live usage monitoring
 
-- Done: [ ]
+- Done: [x]
 - Outcome: The validated provider powers usage cards with native GitHub sign-in and secure token lifecycle management, normalized metrics, scheduled/manual refresh, immutable historical observations, consistent latest-state caching, range queries, retention/deletion controls, rate-limit handling, and isolated failure states.
 - Covers: AC4, AC5, AC7, AC10
 - Check: Verify live Copilot retrieval and metric-boundary, stale-data, permission, retry, and persistence cases. A sanitized fixture based on the sample must yield 36.1171% calculated usage while retaining 63.8% reported remaining and fractional quota; also cover missing/null fields, schema changes, device-flow denial/expiry/slowdown/cancellation, missing or revoked credentials, permission errors, unavailable secure storage, and account switching. Verify history append/query/replay, unchanged polls, missing data, reset/decrease/gap cases, precision, migrations, retention cleanup, and explicit history deletion.
 
 ### Step 4: Deliver trustworthy live session monitoring
 
-- Done: [ ]
+- Done: [x]
 - Outcome: The validated agent powers live session cards, recovery-aware state transitions, event deduplication, initial snapshots and change subscriptions, with privacy controls and durable settings.
 - Covers: AC3, AC6, AC7
 - Check: Exercise actual waiting/resume/stopped transitions and repeatable duplicate, out-of-order, cancellation, source-error, disconnection, restart, and concurrent-run scenarios.
 
 ### Step 5: Complete installation and operational readiness
 
-- Done: [ ]
+- Done: [x]
 - Outcome: The support matrix, automated builds, locally installable platform packages, setup documentation, signing configuration, and real-device functional validation establish the MVP's supported operating envelope. Any unavailable external signing credentials remain explicitly documented.
 - Covers: AC2, AC7, AC8, AC9
 - Check: Install and exercise the macOS package, verify recovery and launch-at-login behavior, run core checks, and verify hook-driven dashboard updates.
