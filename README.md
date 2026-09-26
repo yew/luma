@@ -4,11 +4,13 @@ A local desktop dashboard for AI usage and agent activity, built with Tauri 2, R
 
 ## Current Status
 
+The current MVP targets macOS. Windows implementation and build configuration are retained for a later release; Windows validation does not block this candidate.
+
 The native app includes GitHub device sign-in, secure credential storage, and direct Copilot usage requests. The desktop shell provides a floating window and tray; browser preview includes explicitly labeled demo and disconnected states. Browser preview cannot invoke native authentication.
 
 Native OAuth feasibility was verified with Luma's own client ID, no extra scopes, and an enterprise Copilot account. Codex Hooks monitoring is implemented: enable it in Settings, trust the hooks in Codex, and receive metadata for subsequent session events. Stop is shown as Turn stopped rather than verified completion; actual desktop hook delivery remains to be validated. See [GitHub authentication](docs/integrations/github-auth.md) and [Codex integration findings](docs/integrations/codex.md).
 
-Persistent settings now cover refresh interval, launch at login, title/path privacy, pin/collapse state, and window geometry. Native persistence/recovery and Windows behavior still need device validation. SQLite usage history now preserves exact decimal observations, supports paginated queries, and provides retention/deletion controls. See [usage history](docs/integrations/usage-history.md). The approved [MVP plan](docs/plans/active/2026-09-26-luma-desktop-mvp.md) remains incomplete until its acceptance criteria are met.
+Persistent settings now cover refresh interval, launch at login, title/path privacy, pin/collapse state, and window geometry. Core macOS persistence/recovery checks passed; Windows device validation is deferred. SQLite usage history now preserves exact decimal observations, supports paginated queries, and provides retention/deletion controls. See [usage history](docs/integrations/usage-history.md). The approved [MVP plan](docs/plans/active/2026-09-26-luma-desktop-mvp.md) remains incomplete until its acceptance criteria are met.
 
 ## Development
 
@@ -25,7 +27,7 @@ For the browser preview at `http://127.0.0.1:1420/`, use `npm run dev`. See [dev
 
 The [desktop workflow](.github/workflows/desktop.yml) defines macOS Apple Silicon/Intel and Windows x64 checks and unsigned installer artifacts. It does not publish releases or use signing credentials. Workflow configuration is not evidence of a successful run or installation.
 
-Existing local frontend and native macOS compilation checks passed and a visible native window was observed. Complete device interaction, installer, Windows, recovery, and performance checks are still pending. The [support matrix and manual checklist](docs/validation.md) distinguish actual evidence from unverified targets; signing prerequisites are documented separately from unsigned validation builds.
+Existing local frontend and native macOS compilation checks passed and a visible native window was observed. Core macOS installed-app, sleep/wake, monitor, network, and login-start checks passed. Complete live Codex event coverage and final review remain; canceled device/performance tests and deferred Windows work are outside this candidate. The [support matrix and manual checklist](docs/validation.md) distinguish actual evidence from unverified targets; signing prerequisites are documented separately from unsigned validation builds.
 
 ## Codex Metadata Diagnostic
 

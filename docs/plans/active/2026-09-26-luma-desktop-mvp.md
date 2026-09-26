@@ -11,14 +11,15 @@ size: XL
 
 ## Goal
 
-Deliver Luma, a lightweight local desktop dashboard for individual developers on macOS and Windows. Users can inspect AI usage and local agent activity from a floating window without opening each provider or agent application.
+Deliver Luma, a lightweight local desktop dashboard for individual developers on macOS for this MVP. Users can inspect AI usage and local agent activity from a floating window without opening each provider or agent application.
 
 Deliver one bounded MVP candidate: one validated usage provider, one validated agent, a desktop shell, and installable packages. Live integration feasibility is the first dependency, not an assumed capability.
 
-Implementation is underway from an initially empty workspace. Native Copilot access has been validated; complete Codex waiting-state observation and cross-platform device acceptance remain unresolved.
+Implementation is underway from an initially empty workspace. Native Copilot access has been validated; complete Codex event coverage and final MVP acceptance remain unresolved.
 
 ### Decisions and Constraints
 
+- The user deferred Windows work. This candidate targets macOS only. Preserve Windows-compatible source, dependency support, NSIS configuration, and CI jobs, but Windows execution, packages, device checks, and platform-specific failures are not completion gates for this MVP. Reintroduce Windows validation in a later approved scope.
 - Use Tauri 2, React, TypeScript, Vite, CSS variables/component styles, and Rust with Tokio. Use SQLite for settings and cached metadata and the OS credential store for secrets.
 - Keep the application local and single-user, with no custom cloud service. The backend owns credentials, network access, and local file reads; expose only necessary data through minimally privileged Tauri commands/events.
 - Use GitHub Copilot GET /copilot_internal/user through native HTTPS requests and Luma-managed GitHub authorization as the first usage source; validate the contract below in P0. Organization statistics must not substitute for personal subscription allowances. Codex is the first local agent, selected by the user; prioritize observing existing desktop/local conversations using supported events or version-identifiable structured session data.
@@ -39,15 +40,15 @@ This is the authorized implementation route; full AC1/AC6 acceptance still requi
 
 ### Current Implementation Status
 
-- Native GitHub OAuth feasibility passed with Luma's own client ID, no additional scopes, and HTTP 200 from identity and Copilot endpoints; see `docs/integrations/github-auth.md`. Native device authorization, keychain/credential-manager storage, direct Copilot requests, and a sign-in UI are implemented; production end-to-end sign-in and Windows validation remain pending.
+- Native GitHub OAuth feasibility passed with Luma's own client ID, no additional scopes, and HTTP 200 from identity and Copilot endpoints; see `docs/integrations/github-auth.md`. Native device authorization, keychain/credential-manager storage, direct Copilot requests, and a sign-in UI are implemented; macOS installed credential restoration and live polling are validated; Windows validation is deferred.
 - Codex start/completion/failure metadata can be inspected without retaining message content. Existing desktop waiting-state observation is unresolved: no supported listener was found on its owning App Server. See `docs/integrations/codex.md`; AC1 and Step 1 remain incomplete.
-- Independent desktop foundation work provides a React demo/disconnected UI and a Tauri tray/window scaffold. Frontend build and five focused diagnostic tests pass. Proxy-assisted Rust installation and native macOS compilation now pass. A running 360 × 480 Luma window at the floating window layer was observed. Full window/tray interaction checks and Windows validation remain pending; Step 2 is not complete.
+- Independent desktop foundation work provides a React demo/disconnected UI and a Tauri tray/window scaffold. Frontend build and five focused diagnostic tests pass. Proxy-assisted Rust installation and native macOS compilation now pass. A running 360 × 480 Luma window at the floating window layer was observed. Subsequent macOS window/tray checks are recorded below; Windows is outside this candidate.
 
 - Usage persistence now stores immutable account/metric observations and collection outcomes in SQLite, with exact decimal text, schema migrations, replay protection, time-range pagination, rebuildable latest cache, and conservative continuity boundaries. Retention defaults to 90 days with collection disablement and separate account/global history/cache deletion; cleanup runs on collection, settings changes, startup, and hourly while offline.
 - Automatic usage refresh now runs in the Rust backend, including while the dashboard is hidden. Persisted intervals range from 60 to 3600 seconds (default 300); successful-request manual cooldown is 30 seconds. Failures retry after 5 seconds for the first three failures, then 15, 30, 60, 120, and 300 seconds (cap), respecting longer provider delays. Successful polls reset the failure streak. Frontend subscriptions and focus resynchronization consume backend state.
 - User-requested HTTP proxy support adds persistent environment, direct, and explicit HTTP modes in Settings. Saved settings apply to subsequent OAuth and usage requests without restart; URL validation rejects credentials, TLS verification stays enabled, and local CONNECT tests verify routing and failed-save rollback.
-- SQLite preferences persist privacy, pin/collapse, refresh interval, and window geometry; launch-at-login uses the native plugin. Monitor/DPI recovery logic is tested; native login, disconnected-monitor, and Windows interaction checks remain pending.
-- Cross-platform CI is configured to validate macOS ARM64/Intel and Windows x64 and prepare unsigned DMG/NSIS artifacts. Local unsigned Apple Silicon DMG generation, integrity verification, and packaged-process launch succeed; 35 Rust tests, six Node tests, frontend build, and strict clippy pass. CI execution, Windows packages/device testing, and live Codex event coverage are still required. No complete MVP, signing, or release-readiness claim is made.
+- SQLite preferences persist privacy, pin/collapse, refresh interval, and window geometry; launch-at-login uses the native plugin. Monitor/DPI recovery logic is tested; macOS login and disconnected-monitor checks passed; Windows interaction checks are deferred.
+- Cross-platform CI is configured to validate macOS ARM64/Intel and Windows x64 and prepare unsigned DMG/NSIS artifacts. Local unsigned Apple Silicon DMG generation, integrity verification, and packaged-process launch succeed; 35 Rust tests, six Node tests, frontend build, and strict clippy pass. macOS CI execution and live Codex event coverage remain required; Windows packages/device testing are deferred. No complete MVP, signing, or release-readiness claim is made.
 
 - Refresh scheduling now honors Retry-After seconds/HTTP dates, rate-limit resets, and usable Cache-Control/Age guidance. Cache-only/304 responses retain original observation timestamps and do not add history. The frontend displays backend retry deadlines and separates loading, stale, permission, unsupported, rate-limit, and disconnected states. This checkpoint passes 47 Rust tests, eight Node tests, frontend build, strict clippy, and plan lint; complete MVP acceptance remains pending.
 - Compact mode now resizes the native window to 240 logical pixels high, preserves expanded dimensions, temporarily expands for Settings, and clamps restored geometry using the destination monitor DPI. Deterministic geometry checks pass; native multi-display interaction validation remains pending.
@@ -56,11 +57,11 @@ This is the authorized implementation route; full AC1/AC6 acceptance still requi
 
 - The next validation pass adds Vitest component tests for actual proxy/history/authentication controls and repairs stale remount state, failed event-subscription recovery, and late startup settings overwrites. Native fake-store tests cover locked-store retries, replacement/deletion failures, canceled reconnect preserving reauthentication, legacy metadata retry, and identity-mismatch backoff. This pass succeeds with 54 Rust tests, eight Node tests, 14 component tests, frontend build, strict clippy, and plan lint. Native device and Codex waiting-state acceptance remain unmet.
 
-- Codex Hooks now has a native headless receiver, explicit install/disable/clear controls, metadata-only SQLite projection, and session cards/collapsed counts. Synthetic executable delivery and deterministic ordering/privacy/setup tests validate implementation. Hook trust and actual desktop/Windows event delivery remain unverified; stopped/requested states retain confidence limits rather than falsely claiming full AC1/AC6 completion.
+- Codex Hooks now has a native headless receiver, explicit install/disable/clear controls, metadata-only SQLite projection, and session cards/collapsed counts. Synthetic executable delivery and deterministic ordering/privacy/setup tests validate implementation. Complete real macOS hook event coverage remains unverified; Windows hook delivery is deferred; stopped/requested states retain confidence limits rather than falsely claiming full AC1/AC6 completion.
 
 - Permanent-deletion repair adds bounded read-only reconciliation of tracked Codex IDs against the supported local index and rollout filenames. Confirmed missing cards hide after grace/two checks; archives and unreadable sources are preserved, late hooks are suppressed, and reappearing sources restore reversibly. No transcript content is read or Codex data modified.
 
-- A real macOS installed-app pass now verifies matching release binary, native pin/collapse/resize/drag, tray close/show/quit, restart persistence, credential-based usage after restart, login-item registration/removal, physical secondary-display removal, sleep/wake, and resolution recovery. App-only network failure preserves cached usage and recovers automatically after 606 seconds; window controls, settings and credentials survive real sleep/wake and monitor reconnection. Actual logout/login autostart passed: Luma was quit before logout, then launchctl confirmed a new automatically launched PID after login; window/preferences and live usage recovered. The original disabled login preference was restored. Full results are in docs/validation/macos-2026-09-26.md; Windows and live integration acceptance remain open.
+- A real macOS installed-app pass now verifies matching release binary, native pin/collapse/resize/drag, tray close/show/quit, restart persistence, credential-based usage after restart, login-item registration/removal, physical secondary-display removal, sleep/wake, and resolution recovery. App-only network failure preserves cached usage and recovers automatically after 606 seconds; window controls, settings and credentials survive real sleep/wake and monitor reconnection. Actual logout/login autostart passed: Luma was quit before logout, then launchctl confirmed a new automatically launched PID after login; window/preferences and live usage recovered. The original disabled login preference was restored. Full results are in docs/validation/macos-2026-09-26.md; live macOS integration acceptance remains open.
 
 ### Delivery Estimates
 
@@ -69,10 +70,10 @@ These are rough estimates for one developer familiar with the stack, subject to 
 | Phase | Estimate | Deliverable and acceptance criteria |
 | --- | --- | --- |
 | P0: Integration validation | 2–3 days | Retrieve usage from a real account; trigger running, waiting, and completion events from one agent; document authorization and unsupported capabilities. Adjust scope first if these cannot be achieved |
-| P1: Desktop foundation | 2–3 days | Launch on macOS and Windows; working floating window, tray, close/quit behavior, layout, and demo data flows |
+| P1: Desktop foundation | 2–3 days | Launch on macOS; working floating window, tray, close/quit behavior, layout, and demo data flows |
 | P2: Live usage | 2–4 days | Complete the first provider's authentication, historical observations, latest projections, range queries, retention controls, polling, secure credential storage, and stale/error states |
 | P3: Live conversations | 3–5 days | Complete the first agent integration; verify waiting-to-resume transitions, duplicate and out-of-order events, cancellation, restart recovery, and disconnection |
-| P4: Release preparation | 3–5 days | Installers for both platforms, real-device functional validation, installation and integration documentation, and signing before public distribution |
+| P4: Release preparation | 3–5 days | A macOS installer, real-device functional validation, installation and integration documentation, and signing before public distribution |
 
 The original first-release estimate is approximately 3–4 weeks; re-estimate the live-usage phase after assessing native authentication feasibility and the added history storage and retention work. Commit to live-data features only after P0 succeeds or the scope has been explicitly revised.
 
@@ -89,7 +90,7 @@ The P0–P4 phases map to Steps 1–5 below. These estimates describe implementa
 - Display sessions with source, title, project, status, and activity time; maintain trustworthy state across retries, duplicate events, new runs, and restarts.
 - Support a persistent Settings proxy mode (environment, direct, or HTTP proxy), with a validated HTTP server URL applied to new native OAuth and usage operations without restart. Keep TLS verification enabled; reject credentials in the URL instead of persisting proxy secrets in plaintext.
 - Support secure credentials, refresh controls, local persistence, privacy controls for hiding project paths or session titles, and explicit demo/error/unsupported states.
-- Prepare macOS DMG and Windows NSIS packages, build automation, installation/integration documentation, and documented platform validation.
+- Prepare a macOS DMG, build automation, installation/integration documentation, and documented macOS validation.
 
 ### Out of Scope
 
@@ -109,8 +110,8 @@ The P0–P4 phases map to Steps 1–5 below. These estimates describe implementa
 | Styling | CSS variables and component styles | Consistent themes and compact layouts with minimal initial dependencies |
 | Backend | Rust + Tokio | Integrations, asynchronous requests, normalized state, and event delivery |
 | Local storage | SQLite | Settings, recent session metadata, immutable usage history, and latest-state projections |
-| Credentials | macOS Keychain / Windows Credential Manager | Store user-authorized integration credentials |
-| Validation and builds | Rust tests, Vitest, GitHub Actions | Core logic tests and builds for both platforms |
+| Credentials | macOS Keychain | Store user-authorized integration credentials; the existing Windows implementation is retained for later validation |
+| Validation and builds | Rust tests, Vitest, GitHub Actions | Core logic tests and macOS builds; retain Windows build configuration for follow-up |
 
 The backend handles credentials, network access, and local file reads. The frontend receives necessary data through Tauri commands and events with minimal permissions. A general-purpose plugin loader is unnecessary for the first release.
 
@@ -216,7 +217,7 @@ The preferred sign-in mechanism is GitHub OAuth device authorization using an OA
 2. Show the returned user code and verification URL, with an action to open that trusted GitHub URL in the system browser. The user authenticates and grants access on GitHub; Luma never handles the account password. Keep the device code backend-only and temporary.
 3. Poll `https://github.com/login/oauth/access_token` at the server-provided interval. Handle authorization pending, slowdown, denial, expiry, cancellation, and network failure explicitly. Stop on completion/cancellation/expiry, and never run duplicate sign-in loops.
 4. Validate identity and access using authenticated requests to `https://api.github.com/user` and `https://api.github.com/copilot_internal/user`. An issued OAuth token alone does not prove Copilot access. Associate the verified stable GitHub account ID with the returned login and reject mismatched identity before saving usage.
-5. Store the authorized token in macOS Keychain or Windows Credential Manager and expose only connection/account metadata to the frontend. If secure storage is unavailable, report the connection problem without falling back to plaintext storage.
+5. Store the authorized token in macOS Keychain and expose only connection/account metadata to the frontend. If secure storage is unavailable, report the connection problem without falling back to plaintext storage.
 
 P0 must prove that a token obtained through Luma's own OAuth application can call this internal endpoint and document the minimum accepted scopes/token type, including enterprise policy or SSO restrictions where applicable. Success through the user-supplied GitHub CLI command does not establish compatibility with an independently registered OAuth application. Do not invent a required scope or broaden permissions silently. If device-flow tokens are rejected, investigate an explicitly user-provided compatible token as a secondary native setup option; add it only after validating its access and documenting its permissions. Failure of both routes is a concrete integration blocker requiring scope steering, not a reason to restore the CLI dependency.
 
@@ -275,13 +276,13 @@ Adapters parse raw data, domain handles metrics and session state, services mana
 ## Acceptance Criteria
 
 - [ ] AC1: Validate the specified Copilot GET /copilot_internal/user contract through native HTTPS using credentials authorized for Luma against a real response. P0 verifies the token type and minimum permissions independently of GitHub CLI. Integration documentation identifies the real account type, authorization method, supported usage metrics, selected agent/version, and capability limits. A real-account usage retrieval and real running/waiting/completion sequence have been validated; sanitized examples support repeatable checks. Unsupported required capabilities trigger scope steering rather than silent substitution.
-- [ ] AC2: Luma launches on macOS and Windows with a roughly 360 × 480 logical-pixel default window, resizing, dragging, an always-on-top toggle, collapsing, and restored window position. Closing hides to the tray, and tray Quit terminates the application. A disconnected monitor cannot leave the window inaccessible.
+- [ ] AC2: Luma launches on macOS with a roughly 360 × 480 logical-pixel default window, resizing, dragging, an always-on-top toggle, collapsing, and restored window position. Closing hides to the tray, and tray Quit terminates the application. A disconnected monitor cannot leave the window inaccessible.
 - [ ] AC3: The dashboard shows provider usage and session metadata. Waiting sessions precede running sessions and recently completed sessions. Collapsed mode shows waiting/running counts and one selected metric. Status uses text/icons as well as color; loading, disconnected, healthy, stale, insufficient-permission, request-failure, unsupported, and demo states are distinguishable and isolated per integration.
 - [ ] AC4: The live usage adapter supplies supported consumption, allowance, unit, period, reset time, and last-update fields. Percentages require matching metrics/units/periods and a positive limit; zero, unlimited, missing, and not-applicable allowances are distinct. Over-quota percentages may exceed 100% while bars are capped. Incompatible units are never summed. Copilot preserves fractional remaining quota and independently reported remaining percentages; the supplied sample computes to approximately 36.1% used without forcing agreement with reported remaining values.
 - [ ] AC5: Usage refresh defaults to five minutes, respects provider limits/cache guidance, supports manual refresh with cooldown, and retries the first three failures after 5 seconds before backing off through 15, 30, 60, 120, and 300 seconds. Server-required waits take precedence, and success resets the failure streak. A failed refresh preserves the last successful snapshot and marks it stale instead of clearing usage.
 - [ ] AC6: The first agent maps available signals to Running, Waiting for input, Completed, Failed, Canceled, and Unknown. Resume returns to Running; completion means the current run ended successfully. Session/run identity and event deduplication prevent stale or out-of-order events from overwriting a newer run. Silence/process exit alone never imply completion; heartbeat expiry is used only when supported. Reconnection/restart restores or resynchronizes trustworthy state, otherwise showing Unknown.
-- [ ] AC7: Settings persist integrations, refresh interval, network proxy mode/server, launch-at-login preference, privacy options, and window preferences. Luma-managed secrets use macOS Keychain/Windows Credential Manager and do not enter frontend payloads, plaintext caches, fixtures, or logs. Users can disconnect integrations and clear caches. Logs redact secrets and sensitive paths. Copilot supports native sign-in, secure token storage, reauthentication, cancellation, disconnect, and account switching without an installed CLI or helper. OAuth client identity belongs to Luma and no client secret is embedded. Verify expiry/revocation, permission failures, and unavailable secure storage.
-- [ ] AC8: A documented support matrix names tested OS versions and CPU architectures. Automated builds and locally installable DMG/NSIS artifacts are available. Installation/setup documentation and real-device checks cover both platforms; sleep/wake, network recovery, resolution/monitor changes, and launch at login work. Signing/notarization configuration and required external credentials are documented; unsigned validation packages are clearly labeled, and no public-distribution readiness is claimed without actual signing validation.
+- [ ] AC7: Settings persist integrations, refresh interval, network proxy mode/server, launch-at-login preference, privacy options, and window preferences. Luma-managed secrets use macOS Keychain and do not enter frontend payloads, plaintext caches, fixtures, or logs. Users can disconnect integrations and clear caches. Logs redact secrets and sensitive paths. Copilot supports native sign-in, secure token storage, reauthentication, cancellation, disconnect, and account switching without an installed CLI or helper. OAuth client identity belongs to Luma and no client secret is embedded. Verify expiry/revocation, permission failures, and unavailable secure storage.
+- [ ] AC8: A documented support matrix names tested OS versions and CPU architectures. Automated builds and a locally installable macOS DMG are available. Installation/setup documentation and real-device checks cover macOS; sleep/wake, network recovery, resolution/monitor changes, and launch at login work. Signing/notarization configuration and required external credentials are documented; unsigned validation packages are clearly labeled, and no public-distribution readiness is claimed without actual signing validation.
 - [ ] AC9: Core logic and adapter parsing pass meaningful automated checks. Hook-driven updates typically appear within one second during functional validation.
 
 - [ ] AC10: Successful usage polls append immutable, timestamped, account/metric-scoped observations with historical plan/allowance, precision, period/reset, and continuity metadata; latest-state projection remains consistent. Replayed collections are idempotent, unchanged new polls remain represented, and failed/cache-only polls never fabricate samples. Bounded time-range queries survive application restarts and schema migrations. Reset/decrease/gap and semantics changes cannot produce false consumption deltas. Default 90-day retention, configurable retention, history disablement, separate cache/history clearing, and per-account/global history deletion work without cross-account leakage.
@@ -295,10 +296,11 @@ Adapters parse raw data, domain handles metrics and session state, services mana
 - Verify least-privilege IPC, local endpoint authentication if applicable, credential storage, redaction, and that no conversation bodies or external cookies are collected.
 - Check historical series identity, decimal precision, collection idempotency, transactional latest updates, time-range queries, migrations, and retention/deletion. Confirm reset boundaries and gaps cannot be misrepresented as observed consumption; history collection is in scope even though charts are deferred.
 - Check frontend snapshot/subscription synchronization and recovery after backend restart, network loss, sleep, or agent disconnection.
-- Confirm native window/tray behavior and accessibility on both platforms, supported-platform claims against actual evidence, and accurate labeling of demo and unsigned artifacts.
+- Confirm native window/tray behavior and accessibility on macOS, supported-platform claims against actual evidence, and accurate labeling of demo and unsigned artifacts.
 
 ## Deferred Items
 
+- Windows support validation and delivery: NSIS packaging, Credential Manager, Hooks execution, window/tray behavior, proxy, recovery, and login startup. Existing implementation and build configuration are retained; no Windows support claim is made for this macOS MVP.
 - Use manual upgrades initially. Additional providers/agents, configurable completion notifications, historical trend charts/analytics UI, cost forecasting, and automatic updates are deferred. History collection, compatible storage, retention, and range queries are part of this MVP.
 - Advanced window behavior, cross-device sync, team features, and task orchestration.
 - External signing credential acquisition and public distribution. Actual signing/notarization validation remains a prerequisite for later public-distribution claims.
@@ -312,12 +314,12 @@ Adapters parse raw data, domain handles metrics and session state, services mana
 - Covers: AC1
 - Check: Complete authorization with Luma credentials and retrieve Copilot usage through native HTTPS without gh installed, confirm account/metric semantics and raw-field mapping, and trigger an actual running → waiting → resumed → completed agent sequence; compare observations with documented source semantics.
 
-### Step 2: Establish the cross-platform desktop experience
+### Step 2: Establish the macOS desktop experience
 
 - Done: [ ]
-- Outcome: The Tauri application provides the floating dashboard, tray lifecycle, collapsed view, settings foundation, and explicitly labeled demo states on both platforms.
+- Outcome: The Tauri application provides the floating dashboard, tray lifecycle, collapsed view, settings foundation, and explicitly labeled demo states on macOS.
 - Covers: AC2, AC3, AC9
-- Check: Launch on both target platforms and verify window/tray interactions, session ordering, and empty/error/demo states.
+- Check: Launch on macOS and verify window/tray interactions, session ordering, and empty/error/demo states.
 
 ### Step 3: Deliver native authentication and persistent live usage monitoring
 
@@ -338,16 +340,16 @@ Adapters parse raw data, domain handles metrics and session state, services mana
 - Done: [ ]
 - Outcome: The support matrix, automated builds, locally installable platform packages, setup documentation, signing configuration, and real-device functional validation establish the MVP's supported operating envelope. Any unavailable external signing credentials remain explicitly documented.
 - Covers: AC2, AC7, AC8, AC9
-- Check: Install and exercise packages on both platforms, verify recovery and launch-at-login behavior, run core checks, and verify hook-driven dashboard updates.
+- Check: Install and exercise the macOS package, verify recovery and launch-at-login behavior, run core checks, and verify hook-driven dashboard updates.
 
 ## Validation Strategy
 
 - Use Rust tests for backend domain/state logic and adapter parsing, and Vitest for frontend logic where behavior warrants tests. Use sanitized provider responses and versioned agent events for deterministic error, boundary, deduplication, and recovery cases.
 - Verify AC10 using deterministic collection times, fractional values, reset/decrease and account/plan-change sequences, duplicate and unchanged polls, failed requests, restart/migration cases, bounded range queries, and retention/deletion boundaries. No trend UI is required to validate the storage contract.
-- Validate sign-in and live Copilot retrieval on supported macOS/Windows installations without GitHub CLI or jq. Exercise authorization pending/slowdown/denied/expired states, cancellation, revoked credentials, permission restrictions, reconnect, secure-store errors, disconnect, and account isolation; use protocol fixtures for repeatable failure cases.
+- Validate sign-in and live Copilot retrieval on supported macOS installations without GitHub CLI or jq. Exercise authorization pending/slowdown/denied/expired states, cancellation, revoked credentials, permission restrictions, reconnect, secure-store errors, disconnect, and account isolation; use protocol fixtures for repeatable failure cases.
 - Require real integration checks for AC1; fixtures support regression testing but cannot prove live access. Identify the exact account class and agent version without committing secrets or private transcripts.
-- Validate frontend type checking/builds and backend checks on supported build hosts. GitHub Actions provides repeatable macOS/Windows build evidence once repository hosting is available. CI success does not substitute for native desktop interaction checks.
-- Run a real-device matrix covering close/quit, tray recovery, pin/collapse/resize, display/resolution changes, sleep/wake, network loss, launch at login, credential persistence, cache clearing, and integration disconnection. Unavailable platform access remains an unmet criterion, not an inferred pass.
+- Validate frontend type checking/builds and backend checks on supported build hosts. GitHub Actions provides repeatable macOS build evidence once repository hosting is available. CI success does not substitute for native desktop interaction checks.
+- Run a real-device matrix covering close/quit, tray recovery, pin/collapse/resize, display/resolution changes, sleep/wake, network loss, launch at login, credential persistence, cache clearing, and integration disconnection. Unavailable in-scope macOS validation remains unmet, not an inferred pass. Windows access is not required for this candidate.
 - Record tested device/version and source-event-to-dashboard behavior during functional validation. Preserve historical resource measurements as evidence only.
 - Keep durable capability/support/setup documentation in tracked files and disposable logs, screenshots, test output, and measurement evidence under the runtime root returned by `harness repo config get paths.local_runtime`. Do not commit raw credentials or user conversation content.
 - Reread the complete self-contained plan, run `harness plan lint` before approval, and retain unmet criteria until evidence supports completion. Harness review/archive/publish/merge remain lifecycle gates outside the work breakdown.

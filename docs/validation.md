@@ -6,6 +6,10 @@ This is the current evidence record and a repeatable manual checklist, not a rel
 
 See [macOS installed-app acceptance, 2026-09-26](validation/macos-2026-09-26.md) for the actual installed release, UI interactions, monitor removal, sleep/wake, persisted settings, completed login/network checks, and the current validation scope. Earlier baseline sections below retain their original scope.
 
+## Current Platform Scope
+
+The user deferred Windows from this MVP. Current acceptance applies to macOS. Windows rows and CI jobs below are retained for future work and do not block this candidate, nor count as verified support.
+
 ## Platform Evidence
 
 | Platform | Architecture | Evidence | Remaining validation |
@@ -13,8 +17,8 @@ See [macOS installed-app acceptance, 2026-09-26](validation/macos-2026-09-26.md)
 | macOS 26.6.2, build 25G83 | Apple Silicon / arm64 | Existing local frontend and Rust checks/native compilation passed; a visible 360 × 480 native window was observed. Current host version was read on 2026-09-26. | Frontend build, 35 Rust tests, strict clippy, and plan lint pass for the current implementation; unsigned DMG creation/integrity and launch directly from the read-only DMG pass. SQLite schema 2 and default retention initialize. See the latest installed-app record for verified interactions; live integration coverage remains separately tracked. |
 | macOS 15 (`macos-15` CI runner) | arm64 | Automated validation and DMG job configured; no run result recorded. | CI execution, package installation, and physical-device tests. |
 | macOS 15 (`macos-15-intel` CI runner) | x86_64 | Automated validation and DMG job configured; no run result recorded. | CI execution, package installation, and physical-device tests. |
-| Windows Server 2022 (`windows-2022` CI runner) | x86_64 / MSVC | Automated validation and NSIS job configured; no run result recorded. | CI execution and installer creation. Server build coverage is not Windows desktop validation. |
-| Windows desktop | x86_64 | No real-device result recorded. | Record exact Windows edition/version and run the complete checklist. |
+| Windows Server 2022 (`windows-2022` CI runner) | x86_64 / MSVC | Automated validation and NSIS job configured; no run result recorded. | Deferred: CI execution and installer creation. Server build coverage is not Windows desktop validation. |
+| Windows desktop | x86_64 | No real-device result recorded. | Deferred: record exact Windows edition/version and run the checklist in a later scope. |
 
 No tested minimum OS version is established. Windows ARM64 and universal macOS packages are not currently in the build matrix. Runner labels are explicit and their architectures follow the [GitHub runner image table](https://github.com/actions/runner-images); preserve the actual runner image version from every run because hosted images change. No signed/notarized package or public-distribution readiness is claimed.
 
