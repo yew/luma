@@ -15,12 +15,20 @@ The user deferred Windows from this MVP. Current acceptance applies to macOS. Wi
 | Platform | Architecture | Evidence | Remaining validation |
 | --- | --- | --- | --- |
 | macOS 26.6.2, build 25G83 | Apple Silicon / arm64 | Existing local frontend and Rust checks/native compilation passed; a visible 360 × 480 native window was observed. Current host version was read on 2026-09-26. | Frontend build, 35 Rust tests, strict clippy, and plan lint pass for the current implementation; unsigned DMG creation/integrity and launch directly from the read-only DMG pass. SQLite schema 2 and default retention initialize. See the latest installed-app record for verified interactions; live integration coverage remains separately tracked. |
-| macOS 15 (`macos-15` CI runner) | arm64 | Automated validation and DMG job configured; no run result recorded. | CI execution, package installation, and physical-device tests. |
-| macOS 15 (`macos-15-intel` CI runner) | x86_64 | Automated validation and DMG job configured; no run result recorded. | CI execution, package installation, and physical-device tests. |
+| macOS 15 (`macos-15` CI runner) | arm64 | DMG build and tests passed in Actions run 36233920053 at 71ccb94 (historical candidate). | CI execution, package installation, and physical-device tests. |
+| macOS 15 (`macos-15-intel` CI runner) | x86_64 | DMG build and tests passed in Actions run 36233920053 at 71ccb94 (historical candidate). | CI execution, package installation, and physical-device tests. |
 | Windows Server 2022 (`windows-2022` CI runner) | x86_64 / MSVC | Automated validation and NSIS job configured; no run result recorded. | Deferred: CI execution and installer creation. Server build coverage is not Windows desktop validation. |
 | Windows desktop | x86_64 | No real-device result recorded. | Deferred: record exact Windows edition/version and run the checklist in a later scope. |
 
 No tested minimum OS version is established. Windows ARM64 and universal macOS packages are not currently in the build matrix. Runner labels are explicit and their architectures follow the [GitHub runner image table](https://github.com/actions/runner-images); preserve the actual runner image version from every run because hosted images change. No signed/notarized package or public-distribution readiness is claimed.
+
+## Current Candidate Package
+
+The macOS DMG rebuilt with the fast-retry code at 6dbd835 passes hdiutil integrity verification. SHA-256: 6d14fcaa733e3cc30600746b1eda0338b16f0d5d2be81dcaf3b95089db76da9b. It remains unsigned; this does not establish public-distribution readiness.
+
+## CI Evidence
+
+[Desktop validation run 36233920053](https://github.com/yew/luma/actions/runs/36233920053) completed successfully for macOS Apple Silicon and Intel at commit 71ccb94. Both jobs ran tests/lint and built unsigned DMGs. Current-candidate CI must be checked after publication; no Intel device acceptance is inferred.
 
 ## Existing Integration Evidence
 
