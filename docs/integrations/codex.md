@@ -2,6 +2,51 @@
 
 Codex is the first local agent, selected by the user. Prioritize observing existing local Codex conversations, including desktop sessions; do not launch or take over tasks to make monitoring work. Luma must not approve requests, answer prompts, resume threads, or start another daemon implicitly.
 
+## Hook Monitoring (Implemented)
+
+The user selected Codex lifecycle hooks as the monitoring source. Luma now provides a native headless command in the same executable, a metadata-only SQLite event projection, dashboard session cards, and explicit install/disable/clear controls. No private App Server socket, conversation transcript reader, cloud service, Python, Node, or GitHub CLI is required at runtime. The App Server findings below are historical context rather than a blocker for this implementation path.
+
+### Enable and Remove
+
+1. Install Luma in a stable location before enabling hooks; do not enable from a temporary DMG mount or a build output that will be deleted.
+2. Open Settings → Codex monitoring → Enable Codex hooks. Luma merges its eight handlers into the user hooks.json under CODEX_HOME when that is an absolute configured path, otherwise ~/.codex/hooks.json. Existing unrelated handlers are preserved. Inline config.toml hooks remain untouched.
+3. In Codex CLI, use /hooks to review and trust the new definitions. Luma does not bypass trust or approve any agent action. Desktop sessions may need to be reopened or restarted to load the definitions; a real installed-version check is still required.
+4. Start a new turn in Codex. Luma shows sessions only after their first valid event; it does not discover or backfill all existing conversations.
+5. Disable monitoring stops collection and removes only Luma-owned handlers. Clear saved sessions is a separate confirmed operation. If Luma moves, use Repair hooks (or enable again) to update executable paths, then review trust again.
+
+Setup uses a process-safe advisory lock, an atomic JSON replacement, and a pre-write concurrent-edit check. Invalid or symlinked configuration is rejected instead of overwritten. An install manifest remembers old Luma commands so interrupted repairs can remove only those commands. A local failure is shown in Settings. External applications do not honor Luma's advisory lock; avoid simultaneously editing hooks.json during setup.
+
+### Events and Confidence
+
+| Hook | Luma projection | Limit |
+| --- | --- | --- |
+| SessionStart | Unknown | Opening/resuming is not proof of running |
+| UserPromptSubmit | Running | Prompt entered the current turn |
+| PreToolUse | Running; recognized input tools create Waiting | Explicit local-tool event; hosted/special tool coverage may differ |
+| PermissionRequest | Waiting, with approval-request detail | Another hook may auto-approve; this is a provisional request observation |
+| PostToolUse | Running after the matching pending request resolves | Unrelated tool callbacks do not clear waiting requests |
+| Stop | Turn stopped | Other hooks can request continuation; no verified success claim |
+| Interrupt | Canceled | Main-turn interruption only |
+| SessionEnd | Unknown / ended detail | Does not establish successful completion |
+
+Exact recognized input tool names are request_user_input, ask_user, functions.request_user_input and functions.ask_user. Their actual desktop invocation must be verified; an absent hook never becomes inferred waiting. Subagent-tagged payloads are ignored to avoid assigning child state to a parent session. Failed tools do not imply failed turns, and no generic Failed or Completed state is fabricated from these hooks.
+
+### Local Data and Delivery
+
+A command handler invokes the installed Luma executable with --luma-codex-hook-v1 and the private application database path. The handler consumes at most 1 MiB JSON on stdin, retaining only session/turn IDs, tool identity, event kind, receive time, and project basename. Titles are synthetic session labels. Prompts, assistant text, tool arguments/results, absolute paths, and transcript paths are discarded. The helper returns an empty JSON object, never approval/denial/continuation output, and exits within a bounded lifetime even if stdin stalls. Windows commands use the built-in PowerShell launcher with an encoded literal invocation and explicit stdin forwarding; no separate scripting runtime is bundled.
+
+The helper writes the dedicated codex-hooks.sqlite3 directly using SQLite WAL and a 500 ms busy timeout. No network listener is exposed, and proxy settings do not affect it. This is a same-user local queue, not a security boundary against other processes running as that user. Hook failures do not interrupt Codex. Unreceived events cannot be reconstructed. The GUI polls the projection every 500 ms and emits changes; it re-reads and resubscribes on focus after a subscription failure. Status revisions prevent delayed reads/actions replacing newer events.
+
+The store defaults to disabled, retains at most 200 sessions and 20,000 dedup IDs for seven days, and keeps only bounded pending-wait/run metadata. Duplicate event IDs and older timestamps cannot regress state; callbacks from retired turns cannot end a newer turn. Equal-timestamp terminal ambiguity becomes Unknown. Startup invalidates retained running/waiting state until fresh evidence arrives. Silence is never interpreted as completion. Separate deletion leaves the enabled setting intact.
+
+### Validation Boundary
+
+Rust tests cover normalization, configuration merge/install/remove and malformed-file preservation, decimal-free metadata persistence, state ordering/dedup, parallel waits, restart, retention, and concurrent SQLite reads. UI tests cover status ordering/privacy and explicit setup/removal/deletion. A native executable smoke test injects synthetic stdin events into a temporary database and verifies running → waiting → running → stopped plus cancellation, disabled collection, malformed input, and no prompt/body retention.
+
+Validation currently passes 73 Rust tests, 24 UI component tests, eight Node tests, frontend build, strict clippy, and plan lint.
+
+These automated/synthetic checks do not establish that the current Codex desktop has loaded and trusted the handlers. Actual desktop hooks, Windows execution/stdin forwarding, and complete final-success/failure evidence remain unverified. AC1/AC6 are not marked complete from fixtures. The official reference is [Codex Hooks](https://developers.openai.com/codex/hooks); the installed protocol schema confirms all eight event names and command handler fields.
+
 ## Local Evidence
 
 Inspection on 2026-09-26 used installed `codex-cli 0.155.0-alpha.16.4`. This is a version-specific baseline, not a compatibility promise for all Codex versions.

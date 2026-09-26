@@ -5,10 +5,10 @@ import { HistorySettings } from '../../src/HistorySettings';
 import { App } from '../../src/App';
 import { GitHubUsage, type Auth } from '../../src/GitHubUsage';
 
-const bridge = vi.hoisted(() => ({ invoke: vi.fn(), native: true, listener: null as null | ((event: { payload: Auth }) => void), unlisten: vi.fn() }));
+const bridge = vi.hoisted(() => ({ invoke: vi.fn(), native: true, listener: null as null | ((event: { payload: Auth }) => void), codexListener: null as null | ((event: { payload: any }) => void), unlisten: vi.fn() }));
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ startDragging: vi.fn().mockResolvedValue(undefined) }) }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: bridge.invoke, isTauri: () => bridge.native }));
-vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async (_name, callback) => { bridge.listener = callback; return bridge.unlisten; }) }));
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async (_name, callback) => { if (_name === 'github-status') bridge.listener = callback; if (_name === 'codex-status') bridge.codexListener = callback; return bridge.unlisten; }) }));
 const disconnected = (revision = 1): Auth => ({ revision, state: 'disconnected', next_refresh_at: null, account: null, snapshot: null, error: null });
 const connected = (revision = 2): Auth => ({ ...disconnected(revision), state: 'connected', account: { id: 42, login: 'account-a' }, snapshot: {
   account_id: 42, login: 'account-a', plan: 'enterprise', reset_at: null, fetched_at: Date.now(), used_percent: 36.1171,
@@ -186,5 +186,20 @@ describe('dashboard preference ordering', () => {
     expect(screen.getByRole('button', { name: 'Always on top' }).getAttribute('aria-pressed')).toBe('false');
     await act(async () => initial.resolve(defaultPreferences));
     expect(screen.getByRole('button', { name: 'Always on top' }).getAttribute('aria-pressed')).toBe('false');
+  });
+});
+
+describe('Codex snapshot synchronization', () => {
+  it('rejects a late old snapshot after a newer hook event', async () => {
+    const initial = deferred<unknown>();
+    bridge.invoke.mockImplementation(async command => {
+      if (command === 'get_preferences') return defaultPreferences;
+      if (command === 'github_status') return disconnected();
+      if (command === 'codex_status') return initial.promise;
+    });
+    render(<App/>); await flush();
+    act(() => bridge.codexListener?.({ payload: { revision: 5, enabled: true, installed: true, error: null, sessions: [{session_id:'new',turn_id:'turn',title:'Fresh session',project:'project',status:'running',detail:'Observed hook',last_activity:Date.now()}] } }));
+    await act(async () => initial.resolve({ revision: 1, enabled: false, installed: false, error: null, sessions: [] }));
+    expect(screen.getByText('Fresh session')).toBeTruthy();
   });
 });

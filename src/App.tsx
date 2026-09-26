@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { GitHubUsage, type Auth } from './GitHubUsage';
 import { Settings, defaultPreferences, type Preferences } from './Settings';
 import { HistorySettings } from './HistorySettings';
+import { CodexSessions, CodexSettings, type CodexStatus } from './CodexSessions';
 import { listen } from '@tauri-apps/api/event';
 import { isTauri, invoke } from '@tauri-apps/api/core';
 import { usageState } from './lib/usage-state.mjs';
@@ -20,6 +21,9 @@ export function App() {
   const [preferences, setPreferences] = useState<Preferences>(defaultPreferences);
   const [clock, setClock] = useState(Date.now());
   useEffect(() => { const timer = setInterval(() => setClock(Date.now()), 15000); return () => clearInterval(timer); }, []);
+  const codexRevision = useRef(-1);
+  const applyCodex = useCallback((status: CodexStatus) => { if (status && (status.revision ?? 0) >= codexRevision.current) { codexRevision.current = status.revision ?? 0; setCodex(status); } }, []);
+  const [codex, setCodex] = useState<CodexStatus | null>(null);
   const [auth, setAuth] = useState<Auth | null>(null);
   const { collapsed, pinned, hide_titles: hideTitles, hide_paths: hidePaths } = preferences;
   const [settings, setSettings] = useState(false);
@@ -36,6 +40,28 @@ export function App() {
     const errors = listen<string>('preferences-error', event => setMessage(event.payload));
     return () => { alive = false; void errors.then(unlisten => unlisten()).catch(() => {}); };
   }, []);
+  useEffect(() => {
+    if (!isTauri()) { setCodex({ enabled: false, installed: false, sessions: [], error: null }); return; }
+    let alive = true;
+    let subscribing = false;
+    let stop: (() => void) | undefined;
+    const subscribe = async () => {
+      if (stop || subscribing || !alive) return;
+      subscribing = true;
+      try { const unlisten = await listen<CodexStatus>('codex-status', event => { if (alive) applyCodex(event.payload); }); if (alive) stop = unlisten; else unlisten(); }
+      catch {} finally { subscribing = false; }
+    };
+    const synchronize = async () => {
+      await subscribe();
+      if (!alive) return;
+      try { const status = await invoke<CodexStatus>('codex_status'); if (alive && status) applyCodex(status); }
+      catch { if (alive) setCodex(previous => ({ enabled: previous?.enabled ?? false, installed: previous?.installed ?? false, sessions: previous?.sessions ?? [], error: 'Unable to read Codex hook status.' })); }
+    };
+    void synchronize();
+    const focus = () => { void synchronize(); };
+    window.addEventListener('focus', focus);
+    return () => { alive = false; window.removeEventListener('focus', focus); stop?.(); };
+  }, [applyCodex]);
   function updatePreferences(patch: Partial<Preferences>): Promise<void> {
     const version = ++preferenceVersion.current;
     const write = preferenceWrites.current.catch(() => {}).then(async () => {
@@ -63,11 +89,11 @@ export function App() {
       </nav>
     </header>
     {message && <p className="notice" role="status">{message}</p>}
-    {settings && <><Settings preferences={preferences} onPreferencesChange={updatePreferences} demo={demo} onDemoChange={setDemo}/><HistorySettings account={auth?.account ?? null}/></>}
+    {settings && <><Settings preferences={preferences} onPreferencesChange={updatePreferences} demo={demo} onDemoChange={setDemo}/><HistorySettings account={auth?.account ?? null}/><CodexSettings status={codex} onChange={applyCodex}/></>}
     {demo && <p className="demo-note">Demo data · not live usage or session activity</p>}
     {collapsed && !demo && auth && <p className="collapsed-freshness" role="status">GitHub · {usageState(auth, { now: clock, refreshIntervalSeconds: preferences.refresh_interval_secs }).label}</p>}
     {collapsed ? <section className="summary" aria-label="Activity summary">
-      <span><b>{demo ? '1' : '—'}</b> waiting</span><span><b>{demo ? '1' : '—'}</b> running</span><span><b>{demo ? '36.1%' : auth?.snapshot?.used_percent != null ? auth.snapshot.used_percent.toFixed(1) + '%' : '—'}</b> used</span>
+      <span><b>{demo ? '1' : codex?.enabled ? codex.sessions.filter(session => session.status === 'waiting').length : '—'}</b> waiting</span><span><b>{demo ? '1' : codex?.enabled ? codex.sessions.filter(session => session.status === 'running').length : '—'}</b> running</span><span><b>{demo ? '36.1%' : auth?.snapshot?.used_percent != null ? auth.snapshot.used_percent.toFixed(1) + '%' : '—'}</b> used</span>
     </section> : null}
     <div hidden={collapsed}>
       <section aria-labelledby="usage-title">
@@ -87,7 +113,7 @@ export function App() {
         <div className="section-heading"><h2 id="sessions-title">CONVERSATIONS</h2><span>Codex</span></div>
         {demo ? <ul className="sessions">{samples.map((s, index) => <li key={s.title}>
           <span className={`status-icon status-${index}`} aria-hidden="true">{s.symbol}</span><div className="session-info"><h3>{hideTitles ? `Session ${index + 1}` : s.title}</h3><p>{hidePaths ? 'Hidden project' : s.project} <span>· {s.status}</span></p></div>
-        </li>)}</ul> : <div className="empty session-empty"><span className="empty-icon">◎</span><p>No live session connection</p><p className="muted">Waiting-state detection is under validation.</p></div>}
+        </li>)}</ul> : <CodexSessions status={codex} hideTitles={hideTitles} hidePaths={hidePaths} now={clock}/>}
       </section>
     </div>
     <footer><span><i />{demo ? 'Demo preview' : 'Local dashboard'}</span><button className="text-button" onClick={() => setDemo(!demo)}>{demo ? 'Exit demo' : 'Preview demo'}</button></footer>

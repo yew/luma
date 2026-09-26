@@ -1,4 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod codex;
+mod codex_state;
 mod github;
 mod history;
 mod network;
@@ -27,11 +29,18 @@ fn epoch_millis() -> u64 {
 }
 
 fn main() {
+    if codex::run_hook_mode() {
+        return;
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             open_github_verification,
+            codex::codex_status,
+            codex::codex_enable,
+            codex::codex_disable,
+            codex::codex_clear_sessions,
             github::github_status,
             github::github_begin,
             github::github_poll,
@@ -51,6 +60,10 @@ fn main() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
+            app.manage(codex::CodexService::new(
+                &data_dir,
+                &app.path().home_dir()?,
+            )?);
             let storage = Arc::new(storage::Storage::open(data_dir.join("usage.sqlite3"))?);
             storage.prune(epoch_millis())?;
             let preferences = preferences::PreferencesState::initialize(app.handle())?;
@@ -75,6 +88,30 @@ fn main() {
                         .state::<github::GitHubService>()
                         .background_tick(&handle)
                         .await;
+                }
+            });
+            let codex_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                use tauri::Emitter;
+                let mut last = None;
+                let mut cleanup = std::time::Instant::now();
+                let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
+                loop {
+                    tick.tick().await;
+                    if cleanup.elapsed() > std::time::Duration::from_secs(3600) {
+                        codex_handle.state::<codex::CodexService>().prune();
+                        cleanup = std::time::Instant::now();
+                    }
+                    let status = codex_handle.state::<codex::CodexService>().status();
+                    if last.as_ref().is_none_or(|previous: &codex::CodexStatus| {
+                        previous.enabled != status.enabled
+                            || previous.installed != status.installed
+                            || previous.sessions != status.sessions
+                            || previous.error != status.error
+                    }) {
+                        let _ = codex_handle.emit("codex-status", &status);
+                        last = Some(status);
+                    }
                 }
             });
             let show = MenuItem::with_id(app, "show", "Show Luma", true, None::<&str>)?;

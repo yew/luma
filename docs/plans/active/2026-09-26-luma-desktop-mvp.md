@@ -29,6 +29,14 @@ Implementation is underway from an initially empty workspace. Native Copilot acc
 - Keep tracked documents and code in English. This is a standard XL plan covering the original P0–P4 MVP; do not introduce lightweight or coordinated workflow profiles.
 - Plan creation is not implementation approval. Record explicit human approval through the harness before execution. Review, archive, publish, and merge follow the repository lifecycle rather than implementation steps.
 
+### Codex Hooks Implementation Decision
+
+The user selected Hooks for Codex session monitoring. Implement a native headless Luma command that accepts hook JSON on stdin, projects only allowlisted metadata, and records it in a local SQLite queue. Provide explicit install/disable/clear controls preserving existing Codex hook configuration. No private IPC or transcript scanning is required. Codex hook trust remains user-controlled; installing definitions cannot grant that trust.
+
+UserPromptSubmit and execution hooks provide activity evidence; PermissionRequest and supported input-tool hooks show waiting requests with explicit confidence limits. Stop means the turn reached its stop phase, not verified task success; display Turn stopped. Interrupt records cancellation. Unknown events, missing required turn IDs, and uncertain order do not fabricate completion. Unobserved sessions and active sessions across restart remain Unknown until fresh evidence. Hooks may only start working after configuration is trusted and sessions reload; historical events cannot be recovered.
+
+This is the authorized implementation route; full AC1/AC6 acceptance still requires a real supported desktop event sequence and a decision on final success/failure coverage. Unit or injected-hook tests do not establish desktop compatibility.
+
 ### Current Implementation Status
 
 - Native GitHub OAuth feasibility passed with Luma's own client ID, no additional scopes, and HTTP 200 from identity and Copilot endpoints; see `docs/integrations/github-auth.md`. Native device authorization, keychain/credential-manager storage, direct Copilot requests, and a sign-in UI are implemented; production end-to-end sign-in and Windows validation remain pending.
@@ -47,6 +55,8 @@ Implementation is underway from an initially empty workspace. Native Copilot acc
 - A new read-only Codex audit confirms the default daemon control socket is absent and local metadata has no runtime/waiting status. Existing desktop waiting/resume observation still needs a supported owning endpoint; no production status is inferred from private IPC or incomplete files.
 
 - The next validation pass adds Vitest component tests for actual proxy/history/authentication controls and repairs stale remount state, failed event-subscription recovery, and late startup settings overwrites. Native fake-store tests cover locked-store retries, replacement/deletion failures, canceled reconnect preserving reauthentication, legacy metadata retry, and identity-mismatch backoff. This pass succeeds with 54 Rust tests, eight Node tests, 14 component tests, frontend build, strict clippy, and plan lint. Native device and Codex waiting-state acceptance remain unmet.
+
+- Codex Hooks now has a native headless receiver, explicit install/disable/clear controls, metadata-only SQLite projection, and session cards/collapsed counts. Synthetic executable delivery and deterministic ordering/privacy/setup tests validate implementation. Hook trust and actual desktop/Windows event delivery remain unverified; stopped/requested states retain confidence limits rather than falsely claiming full AC1/AC6 completion.
 
 ### Delivery Estimates
 
