@@ -15,7 +15,7 @@ Deliver Luma, a lightweight local desktop dashboard for individual developers on
 
 Deliver one bounded MVP candidate: one validated usage provider, one validated agent, a desktop shell, and installable packages. Live integration feasibility is the first dependency, not an assumed capability.
 
-This is a pre-implementation plan. The workspace was empty when planning began; the application has not been scaffolded, and live provider and agent integrations have not been validated.
+Implementation is underway from an initially empty workspace. Native Copilot access has been validated; complete Codex waiting-state observation and cross-platform device acceptance remain unresolved.
 
 ### Decisions and Constraints
 
@@ -34,6 +34,11 @@ This is a pre-implementation plan. The workspace was empty when planning began; 
 - Native GitHub OAuth feasibility passed with Luma's own client ID, no additional scopes, and HTTP 200 from identity and Copilot endpoints; see `docs/integrations/github-auth.md`. Native device authorization, keychain/credential-manager storage, direct Copilot requests, and a sign-in UI are implemented; production end-to-end sign-in and Windows validation remain pending.
 - Codex start/completion/failure metadata can be inspected without retaining message content. Existing desktop waiting-state observation is unresolved: no supported listener was found on its owning App Server. See `docs/integrations/codex.md`; AC1 and Step 1 remain incomplete.
 - Independent desktop foundation work provides a React demo/disconnected UI and a Tauri tray/window scaffold. Frontend build and five focused diagnostic tests pass. Proxy-assisted Rust installation and native macOS compilation now pass. A running 360 × 480 Luma window at the floating window layer was observed. Full window/tray interaction checks, persistent settings, and Windows validation remain pending; Step 2 is not complete.
+
+- Usage persistence now stores immutable account/metric observations and collection outcomes in SQLite, with exact decimal text, schema migrations, replay protection, time-range pagination, rebuildable latest cache, and conservative continuity boundaries. Retention defaults to 90 days with collection disablement and separate account/global history/cache deletion; cleanup runs on collection, settings changes, startup, and hourly while offline.
+- Automatic usage refresh now runs in the Rust backend, including while the dashboard is hidden. Persisted intervals range from 60 to 3600 seconds (default 300); manual cooldown is 30 seconds and failure backoff starts at 10 minutes with a one-hour cap, respecting longer provider delays. Frontend subscriptions and focus resynchronization consume backend state.
+- SQLite preferences persist privacy, pin/collapse, refresh interval, and window geometry; launch-at-login uses the native plugin. Monitor/DPI recovery logic is tested; native login, disconnected-monitor, and Windows interaction checks remain pending.
+- Cross-platform CI is configured to validate macOS ARM64/Intel and Windows x64 and prepare unsigned DMG/NSIS artifacts. Local unsigned Apple Silicon DMG generation succeeds; 35 Rust tests, six Node tests, frontend build, and strict clippy pass. CI execution, Windows packages/device testing, live Codex event coverage, and extended performance checks are still required. No complete MVP, signing, or release-readiness claim is made.
 
 ### Delivery Estimates
 

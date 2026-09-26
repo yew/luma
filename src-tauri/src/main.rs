@@ -1,5 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod github;
+mod history;
+mod preferences;
+mod storage;
+use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
@@ -8,34 +12,68 @@ use tauri::{
 use tauri_plugin_opener::OpenerExt;
 
 #[tauri::command]
-fn set_pinned(window: tauri::WebviewWindow, pinned: bool) -> Result<(), String> {
-    window
-        .set_always_on_top(pinned)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
 fn open_github_verification(app: tauri::AppHandle) -> Result<(), String> {
     app.opener()
         .open_url("https://github.com/login/device", None::<&str>)
         .map_err(|_| "Unable to open GitHub in the system browser".to_string())
 }
 
+fn epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(github::GitHubService::new().expect("Unable to initialize GitHub integration"))
+        .plugin(tauri_plugin_autostart::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
-            set_pinned,
             open_github_verification,
             github::github_status,
             github::github_begin,
             github::github_poll,
             github::github_cancel,
             github::github_disconnect,
-            github::github_refresh
+            github::github_refresh,
+            preferences::get_preferences,
+            preferences::update_preferences,
+            history::history_settings,
+            history::update_history_settings,
+            history::query_usage_history,
+            history::rebuild_usage_cache,
+            history::clear_usage_history,
+            history::clear_usage_cache
         ])
         .setup(|app| {
+            let data_dir = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&data_dir)?;
+            let storage = Arc::new(storage::Storage::open(data_dir.join("usage.sqlite3"))?);
+            storage.prune(epoch_millis())?;
+            app.manage(github::GitHubService::new(storage.clone()).map_err(|e| e.message)?);
+            app.manage(storage);
+            let preferences = preferences::PreferencesState::initialize(app.handle())?;
+            app.manage(preferences);
+            preferences::restore_window(app.handle())?;
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+                let mut cleanup_at = std::time::Instant::now();
+                loop {
+                    tick.tick().await;
+                    if cleanup_at.elapsed() >= std::time::Duration::from_secs(3600) {
+                        let _ = handle
+                            .state::<Arc<storage::Storage>>()
+                            .prune(epoch_millis());
+                        cleanup_at = std::time::Instant::now();
+                    }
+                    handle
+                        .state::<github::GitHubService>()
+                        .background_tick(&handle)
+                        .await;
+                }
+            });
             let show = MenuItem::with_id(app, "show", "Show Luma", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Luma", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;
@@ -54,6 +92,7 @@ fn main() {
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
+                        let _ = preferences::restore_window(app);
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.show();
                             let _ = window.set_focus();
@@ -66,6 +105,7 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            preferences::persist_window_event(window, event);
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // Only suppress closing after a successful hide.
                 if window.hide().is_ok() {

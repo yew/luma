@@ -1,8 +1,14 @@
 //! Native GitHub device flow. Secrets never implement Serialize or Debug.
+use crate::storage::{AccountKey, ObservationInput, Storage};
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+static STATUS_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::State;
+use tauri::{Emitter, State};
 use tokio::sync::{watch, Mutex};
 
 #[derive(Clone, Serialize, Debug, PartialEq)]
@@ -42,13 +48,14 @@ pub struct Account {
 }
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct PremiumQuota {
-    pub entitlement: Option<f64>,
-    pub credits_used: Option<f64>,
-    pub quota_remaining: Option<f64>,
-    pub percent_remaining: Option<f64>,
+    pub entitlement: Option<serde_json::Number>,
+    pub credits_used: Option<serde_json::Number>,
+    pub quota_remaining: Option<serde_json::Number>,
+    pub percent_remaining: Option<serde_json::Number>,
     pub overage_permitted: Option<bool>,
+    pub unlimited: Option<bool>,
 }
-#[derive(Clone, Serialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct CopilotSnapshot {
     pub account_id: u64,
     pub login: String,
@@ -60,6 +67,7 @@ pub struct CopilotSnapshot {
 }
 #[derive(Clone, Serialize)]
 pub struct AuthStatus {
+    pub revision: u64,
     pub state: String,
     pub account: Option<Account>,
     pub snapshot: Option<CopilotSnapshot>,
@@ -112,6 +120,8 @@ struct DeviceSession {
 struct StoredToken {
     access_token: String,
     expires_at: Option<u64>,
+    #[serde(default)]
+    account: Option<Account>,
 }
 fn restore_token(value: &str) -> Result<StoredToken, GitHubError> {
     if value.starts_with('{') {
@@ -124,6 +134,7 @@ fn restore_token(value: &str) -> Result<StoredToken, GitHubError> {
         Ok(StoredToken {
             access_token: value.to_owned(),
             expires_at: None,
+            account: None,
         })
     }
 }
@@ -171,6 +182,7 @@ impl Inner {
             "disconnected"
         };
         AuthStatus {
+            revision: STATUS_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1,
             state: state.into(),
             account: self.account.clone(),
             snapshot: self.snapshot.clone(),
@@ -180,6 +192,7 @@ impl Inner {
 }
 pub struct GitHubService {
     client: Client,
+    storage: Arc<Storage>,
     client_id: String,
     inner: Mutex<Inner>,
     cancel: watch::Sender<u64>,
@@ -199,7 +212,7 @@ fn seconds_until(deadline: Instant, now: Instant) -> u64 {
     remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0)
 }
 impl GitHubService {
-    pub fn new() -> Result<Self, GitHubError> {
+    pub fn new(storage: Arc<Storage>) -> Result<Self, GitHubError> {
         let config: OAuthConfig =
             serde_json::from_str(include_str!("../../config/github-oauth.json")).map_err(|_| {
                 GitHubError::new("configuration", "Invalid GitHub OAuth configuration.")
@@ -224,6 +237,7 @@ impl GitHubService {
         let (cancel, _) = watch::channel(0);
         Ok(Self {
             client,
+            storage,
             client_id: config.client_id,
             cancel,
             restore: Mutex::new(()),
@@ -240,6 +254,128 @@ impl GitHubService {
                 failures: 0,
             }),
         })
+    }
+    fn persist(
+        &self,
+        collection_id: &str,
+        started_at: u64,
+        account: &Account,
+        snapshot: &CopilotSnapshot,
+    ) -> Result<(), GitHubError> {
+        let premium = &snapshot.premium;
+        let observation = ObservationInput {
+            metric: "premium_interactions".into(),
+            unit: "provider_quota_credit".into(),
+            semantics_version: "copilot-premium-v1".into(),
+            semantics_verified: false,
+            aggregation_kind: "cumulative_counter".into(),
+            allowance_kind: if premium.unlimited == Some(true) {
+                "unlimited"
+            } else if premium.entitlement.is_some() {
+                "finite"
+            } else {
+                "unknown"
+            }
+            .into(),
+            source_version: "copilot_internal/v1".into(),
+            quality_flags: vec!["semantics_unverified".into(), "collection_time".into()],
+            fetched_at: snapshot.fetched_at,
+            observed_at: None,
+            plan: snapshot.plan.clone(),
+            entitlement: premium.entitlement.as_ref().map(ToString::to_string),
+            used: premium.credits_used.as_ref().map(ToString::to_string),
+            remaining: premium.quota_remaining.as_ref().map(ToString::to_string),
+            reported_percent_remaining: premium.percent_remaining.as_ref().map(ToString::to_string),
+            overage_permitted: premium.overage_permitted,
+            period_id: None,
+            period_start: None,
+            period_end: None,
+            reset_at: snapshot.reset_at.clone(),
+        };
+        if premium.credits_used.is_none() {
+            return self
+                .storage
+                .record_failure(
+                    collection_id,
+                    &account_key(account),
+                    started_at,
+                    snapshot.fetched_at,
+                    "metric_unavailable",
+                )
+                .map(|_| ())
+                .map_err(|_| history_error());
+        }
+        let projection = serde_json::to_value(snapshot).map_err(|_| history_error())?;
+        self.storage
+            .record_success(
+                collection_id,
+                &account_key(account),
+                started_at,
+                snapshot.fetched_at,
+                &[observation],
+                &projection,
+            )
+            .map(|_| ())
+            .map_err(|_| history_error())
+    }
+    pub async fn background_tick(&self, app: &tauri::AppHandle) {
+        let interval = crate::preferences::current_refresh_interval(app);
+        let should_refresh = {
+            let inner = self.inner.lock().await;
+            inner.loaded
+                && inner.token.is_some()
+                && !inner.busy
+                && inner.device.is_none()
+                && !inner
+                    .error
+                    .as_ref()
+                    .is_some_and(|e| e.code == "reauth_required")
+                && inner.next_refresh.is_none_or(|next| next <= Instant::now())
+                && (inner
+                    .error
+                    .as_ref()
+                    .is_some_and(|e| e.code != "history_storage")
+                    || inner.snapshot.as_ref().is_none_or(|s| {
+                        epoch_millis().saturating_sub(s.fetched_at) >= interval * 1000
+                    }))
+        };
+        if should_refresh {
+            let _ = self.refresh().await;
+            let _ = app.emit("github-status", self.inner.lock().await.status());
+        }
+    }
+    pub async fn clear_cached_snapshot(
+        &self,
+        app: &tauri::AppHandle,
+        account: Option<&AccountKey>,
+    ) -> Result<u64, crate::storage::StorageError> {
+        let (count, status) = self.clear_cache_inner(account).await?;
+        let _ = app.emit("github-status", status);
+        Ok(count)
+    }
+    async fn clear_cache_inner(
+        &self,
+        account: Option<&AccountKey>,
+    ) -> Result<(u64, AuthStatus), crate::storage::StorageError> {
+        // Refresh writes use this same lock; invalidate pending replies before deleting.
+        let mut inner = self.inner.lock().await;
+        let current = account.is_none()
+            || inner
+                .account
+                .as_ref()
+                .is_some_and(|current| account == Some(&account_key(current)));
+        if current {
+            inner.generation = inner.generation.wrapping_add(1);
+            self.cancel.send_replace(inner.generation);
+            inner.busy = false;
+            inner.device = None;
+        }
+        let count = self.storage.clear_cache(account)?;
+        if current {
+            inner.snapshot = None;
+            inner.next_refresh = Some(Instant::now() + Duration::from_secs(30));
+        }
+        Ok((count, inner.status()))
     }
     async fn reserve(&self) -> Result<(u64, watch::Receiver<u64>), GitHubError> {
         let mut inner = self.inner.lock().await;
@@ -295,6 +431,12 @@ impl GitHubService {
             )
             .await?;
         let snapshot = project_copilot(raw, &account, epoch_millis())?;
+        if snapshot.premium.credits_used.is_none() {
+            return Err(GitHubError::new(
+                "metric_unavailable",
+                "GitHub did not report premium usage. Last valid usage is retained.",
+            ));
+        }
         Ok((account, snapshot))
     }
     async fn status(&self) -> AuthStatus {
@@ -311,7 +453,23 @@ impl GitHubService {
                     Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
                     Err(_) => Err(GitHubError::storage()),
                 }) {
-                    Ok(token) => inner.token = token,
+                    Ok(token) => {
+                        if let Some(account) =
+                            token.as_ref().and_then(|token| token.account.clone())
+                        {
+                            inner.snapshot = self
+                                .storage
+                                .latest(&account_key(&account))
+                                .ok()
+                                .flatten()
+                                .and_then(|value| serde_json::from_value(value).ok())
+                                .filter(|snapshot: &CopilotSnapshot| {
+                                    snapshot.account_id == account.id
+                                });
+                            inner.account = Some(account);
+                        }
+                        inner.token = token;
+                    }
                     Err(error) => inner.error = Some(error),
                 }
                 inner.token.is_some()
@@ -489,12 +647,15 @@ impl GitHubService {
             inner.error = Some(error.clone());
             return Err(error);
         }
+        let started_at = epoch_millis();
+        let collection_id = uuid::Uuid::new_v4().to_string();
         let result = async {
-            let token = parse_token(&raw)?;
+            let mut token = parse_token(&raw)?;
             let (account, snapshot) = self
                 .validate(&token.access_token, &mut cancel)
                 .await
                 .map_err(post_exchange_error)?;
+            token.account = Some(account.clone());
             Ok::<_, GitHubError>((token, account, snapshot))
         }
         .await;
@@ -522,9 +683,11 @@ impl GitHubService {
         }
         inner.token = Some(token);
         inner.loaded = true;
+        inner.error = self
+            .persist(&collection_id, started_at, &account, &snapshot)
+            .err();
         inner.account = Some(account);
         inner.snapshot = Some(snapshot);
-        inner.error = None;
         inner.next_refresh = Some(Instant::now() + Duration::from_secs(30));
         inner.failures = 0;
         Ok(PollResult {
@@ -579,6 +742,8 @@ impl GitHubService {
                 }
             }
         };
+        let started_at = epoch_millis();
+        let collection_id = uuid::Uuid::new_v4().to_string();
         let result = self.validate(&token.access_token, &mut cancel).await;
         let mut inner = self.inner.lock().await;
         if generation != inner.generation {
@@ -599,19 +764,54 @@ impl GitHubService {
                     inner.error = Some(error.clone());
                     return Err(error);
                 }
+                // Upgrade legacy credentials with verified identity for account-scoped offline restore.
+                let credential_error = if token
+                    .account
+                    .as_ref()
+                    .is_none_or(|saved| saved.id != account.id)
+                {
+                    let updated = StoredToken {
+                        account: Some(account.clone()),
+                        ..token.clone()
+                    };
+                    credential()
+                        .and_then(|entry| {
+                            entry
+                                .set_password(
+                                    &serde_json::to_string(&updated)
+                                        .map_err(|_| GitHubError::storage())?,
+                                )
+                                .map_err(|_| GitHubError::storage())
+                        })
+                        .err()
+                } else {
+                    None
+                };
+                inner.error = self
+                    .persist(&collection_id, started_at, &account, &snapshot)
+                    .err()
+                    .or(credential_error);
+                if let Some(saved_token) = inner.token.as_mut() {
+                    saved_token.account = Some(account.clone());
+                }
                 inner.account = Some(account);
                 inner.snapshot = Some(snapshot.clone());
-                inner.error = None;
                 inner.next_refresh = Some(Instant::now() + Duration::from_secs(30));
                 inner.failures = 0;
                 Ok(snapshot)
             }
             Err(mut error) => {
+                if let Some(account) = &inner.account {
+                    let _ = self.storage.record_failure(
+                        &collection_id,
+                        &account_key(account),
+                        started_at,
+                        epoch_millis(),
+                        &error.code,
+                    );
+                }
                 inner.failures = inner.failures.saturating_add(1);
-                let delay = error
-                    .retry_after
-                    .unwrap_or(30_u64.saturating_mul(1_u64 << inner.failures.min(6)))
-                    .max(30);
+                let delay = refresh_retry_delay(inner.failures, error.retry_after);
                 inner.next_refresh = Instant::now().checked_add(Duration::from_secs(delay));
                 error.retry_after = Some(delay);
                 inner.error = Some(error.clone());
@@ -652,6 +852,23 @@ impl GitHubService {
                 Err(error)
             }
         }
+    }
+}
+fn refresh_retry_delay(failures: u32, provider_delay: Option<u64>) -> u64 {
+    let exponential = 300_u64.saturating_mul(1_u64 << failures.min(4)).min(3600);
+    provider_delay.unwrap_or(0).max(exponential)
+}
+fn history_error() -> GitHubError {
+    GitHubError::new(
+        "history_storage",
+        "Usage refreshed, but local history could not be saved.",
+    )
+}
+fn account_key(account: &Account) -> AccountKey {
+    AccountKey {
+        provider: "github_copilot".into(),
+        host: "api.github.com".into(),
+        account_id: account.id.to_string(),
     }
 }
 async fn bounded_body(mut response: Response) -> Result<Vec<u8>, GitHubError> {
@@ -770,6 +987,7 @@ fn parse_token(raw: &serde_json::Value) -> Result<StoredToken, GitHubError> {
     Ok(StoredToken {
         access_token,
         expires_at: token_expiration(raw, epoch_millis())?,
+        account: None,
     })
 }
 fn project_copilot(
@@ -796,22 +1014,26 @@ fn project_copilot(
         ));
     }
     let premium = raw.quota_snapshots.premium_interactions;
-    if [
-        premium.entitlement,
-        premium.credits_used,
-        premium.quota_remaining,
-        premium.percent_remaining,
-    ]
-    .into_iter()
-    .flatten()
-    .any(|v| !v.is_finite())
-        || premium.entitlement.is_some_and(|v| v < 0.0)
-        || premium.credits_used.is_some_and(|v| v < 0.0)
+    if premium
+        .entitlement
+        .as_ref()
+        .and_then(|n| n.as_f64())
+        .is_some_and(|v| v < 0.0)
+        || premium
+            .credits_used
+            .as_ref()
+            .and_then(|n| n.as_f64())
+            .is_some_and(|v| v < 0.0)
     {
         return Err(GitHubError::schema());
     }
-    let used_percent = match (premium.credits_used, premium.entitlement) {
-        (Some(used), Some(limit)) if limit > 0.0 => {
+    // JSON numbers retain their exact decimal representation for persistence.
+    // Floating-point conversion is used only for the presentation percentage.
+    let used_percent = match (
+        premium.credits_used.as_ref().and_then(|n| n.as_f64()),
+        premium.entitlement.as_ref().and_then(|n| n.as_f64()),
+    ) {
+        (Some(used), Some(limit)) if limit > 0.0 && premium.unlimited != Some(true) => {
             let percent = used / limit * 100.0;
             percent.is_finite().then_some(percent)
         }
@@ -838,8 +1060,15 @@ pub async fn github_begin(
     service.begin().await
 }
 #[tauri::command]
-pub async fn github_poll(service: State<'_, GitHubService>) -> Result<PollResult, GitHubError> {
-    service.poll().await
+pub async fn github_poll(
+    app: tauri::AppHandle,
+    service: State<'_, GitHubService>,
+) -> Result<PollResult, GitHubError> {
+    let result = service.poll().await;
+    if result.as_ref().is_ok_and(|poll| poll.state == "connected") {
+        let _ = app.emit("github-status", service.inner.lock().await.status());
+    }
+    result
 }
 #[tauri::command]
 pub async fn github_cancel(service: State<'_, GitHubService>) -> Result<(), GitHubError> {
@@ -848,15 +1077,21 @@ pub async fn github_cancel(service: State<'_, GitHubService>) -> Result<(), GitH
 }
 #[tauri::command]
 pub async fn github_disconnect(
+    app: tauri::AppHandle,
     service: State<'_, GitHubService>,
 ) -> Result<AuthStatus, GitHubError> {
-    service.disconnect().await
+    let result = service.disconnect().await;
+    let _ = app.emit("github-status", service.inner.lock().await.status());
+    result
 }
 #[tauri::command]
 pub async fn github_refresh(
+    app: tauri::AppHandle,
     service: State<'_, GitHubService>,
 ) -> Result<CopilotSnapshot, GitHubError> {
-    service.refresh().await
+    let result = service.refresh().await;
+    let _ = app.emit("github-status", service.inner.lock().await.status());
+    result
 }
 
 #[cfg(test)]
@@ -878,8 +1113,14 @@ mod tests {
     fn preserves_provider_values_and_calculates_independent_percentage() {
         let result = project_copilot(fixture(), &account(), 123).unwrap();
         assert!((result.used_percent.unwrap() - 36.1171).abs() < 0.000001);
-        assert_eq!(result.premium.quota_remaining, Some(1277551.1));
-        assert_eq!(result.premium.percent_remaining, Some(63.8));
+        assert_eq!(
+            result.premium.quota_remaining.unwrap().to_string(),
+            "1277551.1"
+        );
+        assert_eq!(
+            result.premium.percent_remaining.unwrap().to_string(),
+            "63.8"
+        );
         assert_eq!(result.fetched_at, 123);
         assert_eq!(result.account_id, 42);
     }
@@ -924,6 +1165,97 @@ mod tests {
         );
     }
     #[test]
+    fn fresh_copilot_collections_preserve_exact_values_and_account_identity() {
+        let service = GitHubService::new(Arc::new(Storage::in_memory().unwrap())).unwrap();
+        let raw: serde_json::Value = serde_json::from_str(r#"{"login":"yew","quota_snapshots":{"premium_interactions":{"entitlement":2000000,"credits_used":722342,"quota_remaining":1277551.100000000000000000001,"percent_remaining":63.8}}}"#).unwrap();
+        let snapshot = project_copilot(raw, &account(), 100).unwrap();
+        service.persist("one", 90, &account(), &snapshot).unwrap();
+        service.persist("one", 90, &account(), &snapshot).unwrap();
+        let query = crate::storage::HistoryQuery {
+            account: account_key(&account()),
+            metric: "premium_interactions".into(),
+            unit: "provider_quota_credit".into(),
+            semantics_version: "copilot-premium-v1".into(),
+            from: 0,
+            to: 1000,
+            limit: 10,
+            cursor: None,
+        };
+        let page = service.storage.query(query).unwrap();
+        assert_eq!(page.observations.len(), 1);
+        assert_eq!(
+            page.observations[0].metric.remaining.as_deref(),
+            Some("1277551.100000000000000000001")
+        );
+        assert_eq!(page.observations[0].continuity_confidence, "unknown");
+        let cached: CopilotSnapshot = serde_json::from_value(
+            service
+                .storage
+                .latest(&account_key(&account()))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cached.account_id, account().id);
+        assert_eq!(
+            cached.premium.quota_remaining,
+            snapshot.premium.quota_remaining
+        );
+        let different = Account {
+            id: 43,
+            login: "another".into(),
+        };
+        assert!(service
+            .storage
+            .latest(&account_key(&different))
+            .unwrap()
+            .is_none());
+    }
+    #[tokio::test]
+    async fn cache_deletion_invalidates_inflight_collection_and_clears_both_projections() {
+        let service = GitHubService::new(Arc::new(Storage::in_memory().unwrap())).unwrap();
+        let snapshot = project_copilot(fixture(), &account(), 100).unwrap();
+        service
+            .persist("before-clear", 90, &account(), &snapshot)
+            .unwrap();
+        {
+            let mut inner = service.inner.lock().await;
+            inner.account = Some(account());
+            inner.snapshot = Some(snapshot);
+        }
+        let (generation, mut cancel) = service.reserve().await.unwrap();
+        let (_, status) = service
+            .clear_cache_inner(Some(&account_key(&account())))
+            .await
+            .unwrap();
+        assert!(status.snapshot.is_none());
+        assert!(service
+            .storage
+            .latest(&account_key(&account()))
+            .unwrap()
+            .is_none());
+        assert!(cancel.changed().await.is_ok());
+        assert_ne!(generation, service.inner.lock().await.generation);
+        assert!(!service.inner.lock().await.busy);
+    }
+    #[test]
+    fn short_provider_hints_cannot_shorten_failure_backoff() {
+        for (failures, expected) in [(1, 600), (2, 1200), (3, 2400), (4, 3600), (100, 3600)] {
+            assert_eq!(refresh_retry_delay(failures, None), expected);
+            assert_eq!(refresh_retry_delay(failures, Some(1)), expected);
+            assert_eq!(refresh_retry_delay(failures, Some(7200)), 7200);
+        }
+    }
+    #[test]
+    fn unlimited_quota_has_no_calculated_percentage() {
+        let mut raw = fixture();
+        raw["quota_snapshots"]["premium_interactions"]["unlimited"] = json!(true);
+        assert!(project_copilot(raw, &account(), 0)
+            .unwrap()
+            .used_percent
+            .is_none());
+    }
+    #[test]
     fn token_response_rejects_scope_expansion_and_unknown_token_types() {
         assert!(
             parse_token(&json!({"access_token":"test-only","token_type":"bearer","scope":""}))
@@ -952,7 +1284,7 @@ mod tests {
     }
     #[tokio::test]
     async fn cancellation_invalidates_inflight_epoch_and_clears_device() {
-        let service = GitHubService::new().unwrap();
+        let service = GitHubService::new(Arc::new(Storage::in_memory().unwrap())).unwrap();
         let (generation, mut cancelled) = service.reserve().await.unwrap();
         service.cancel().await;
         assert!(cancelled.changed().await.is_ok());
@@ -963,7 +1295,7 @@ mod tests {
     }
     #[tokio::test]
     async fn early_polls_do_not_reach_network_and_expired_sessions_stop() {
-        let service = GitHubService::new().unwrap();
+        let service = GitHubService::new(Arc::new(Storage::in_memory().unwrap())).unwrap();
         {
             let mut inner = service.inner.lock().await;
             inner.device = Some(DeviceSession {
@@ -982,7 +1314,7 @@ mod tests {
     }
     #[tokio::test]
     async fn cooldown_and_revocation_block_network_requests() {
-        let service = GitHubService::new().unwrap();
+        let service = GitHubService::new(Arc::new(Storage::in_memory().unwrap())).unwrap();
         service.inner.lock().await.next_refresh = Some(Instant::now() + Duration::from_secs(30));
         assert_eq!(service.refresh().await.unwrap_err().code, "cooldown");
         {
@@ -1051,10 +1383,11 @@ mod tests {
     }
     #[tokio::test]
     async fn expired_saved_token_requires_reconnect_before_network_access() {
-        let service = GitHubService::new().unwrap();
+        let service = GitHubService::new(Arc::new(Storage::in_memory().unwrap())).unwrap();
         service.inner.lock().await.token = Some(StoredToken {
             access_token: "test-only".into(),
             expires_at: Some(1),
+            account: None,
         });
         assert_eq!(service.refresh().await.unwrap_err().code, "reauth_required");
         assert_eq!(service.inner.lock().await.status().state, "reauth_required");

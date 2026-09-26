@@ -1,0 +1,85 @@
+name: Desktop validation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-and-package:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Apple Silicon
+            runner: macos-15
+            target: aarch64-apple-darwin
+            bundle: dmg
+            artifact: macos-arm64
+            package-glob: '*.dmg'
+          - name: macOS Intel
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            bundle: dmg
+            artifact: macos-x64
+            package-glob: '*.dmg'
+          - name: Windows x64
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            bundle: nsis
+            artifact: windows-x64
+            package-glob: '*-setup.exe'
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy --target ${{ matrix.target }}
+      - name: Select Rust toolchain
+        run: rustup default stable
+      - name: Record build environment
+        run: |
+          rustc --version --verbose
+          cargo --version
+          node --version
+          npm --version
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Check frontend and build assets
+        run: npm run build
+      - name: Test frontend and diagnostics
+        run: npm test
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - name: Check Rust targets
+        run: cargo check --manifest-path src-tauri/Cargo.toml --locked --all-targets
+      - name: Lint Rust
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Test Rust
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets
+      - name: Build unsigned validation installer
+        run: npm run tauri -- build --ci --no-sign --target ${{ matrix.target }} --bundles ${{ matrix.bundle }} -- --locked
+      - name: Upload unsigned validation installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: luma-unsigned-${{ matrix.artifact }}-${{ github.sha }}
+          path: src-tauri/target/${{ matrix.target }}/release/bundle/${{ matrix.bundle }}/${{ matrix.package-glob }}
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
