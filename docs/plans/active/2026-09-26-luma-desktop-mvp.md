@@ -60,6 +60,8 @@ This is the authorized implementation route; full AC1/AC6 acceptance still requi
 
 - Permanent-deletion repair adds bounded read-only reconciliation of tracked Codex IDs against the supported local index and rollout filenames. Confirmed missing cards hide after grace/two checks; archives and unreadable sources are preserved, late hooks are suppressed, and reappearing sources restore reversibly. No transcript content is read or Codex data modified.
 
+- A real macOS installed-app pass now verifies matching release binary, native pin/collapse/resize/drag, tray close/show/quit, restart persistence, credential-based usage after restart, login-item registration/removal, physical secondary-display removal, sleep/wake, and resolution recovery. App-only network failure preserves cached usage and recovers automatically after 606 seconds; window controls, settings and credentials survive real sleep/wake and monitor reconnection. Actual logout/login, true 1×/2× scale transition and clean-user installation checks remain unverified. Full results are in docs/validation/macos-2026-09-26.md; Windows and complete AC9 remain unmet.
+
 ### Delivery Estimates
 
 These are rough estimates for one developer familiar with the stack, subject to integration validation. Signing credential applications and external review time are additional.

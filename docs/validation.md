@@ -2,6 +2,10 @@
 
 This is the current evidence record and a repeatable manual checklist, not a release certification. Unchecked items remain unverified. Update each result with the tested commit, exact OS/build, CPU architecture, device, package type, and sanitized evidence location. CI results establish build/test coverage; they do not substitute for interactive device checks.
 
+## Latest macOS Device Pass
+
+See [macOS installed-app acceptance, 2026-09-26](validation/macos-2026-09-26.md) for the actual installed release, UI interactions, monitor removal, sleep/wake, persisted settings, and remaining login/network checks. Earlier baseline sections below retain their original scope.
+
 ## Platform Evidence
 
 | Platform | Architecture | Evidence | Remaining validation |
