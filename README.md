@@ -10,7 +10,7 @@ The native app includes GitHub device sign-in, secure credential storage, and di
 
 Native OAuth feasibility was verified with Luma's own client ID, no extra scopes, and an enterprise Copilot account. Codex Hooks monitoring is implemented: enable it in Settings, trust the hooks in Codex, and receive metadata for subsequent session events. Stop is shown as Turn stopped rather than verified completion; real macOS Waiting and Turn stopped behavior has been validated. See [GitHub authentication](docs/integrations/github-auth.md) and [Codex integration findings](docs/integrations/codex.md).
 
-Persistent settings now cover refresh interval, launch at login, title/path privacy, pin/collapse state, and window geometry. Core macOS persistence/recovery checks passed; Windows device validation is deferred. SQLite usage history now preserves exact decimal observations, supports paginated queries, and provides retention/deletion controls. See [usage history](docs/integrations/usage-history.md). The approved [MVP plan](docs/plans/archived/2026-09-26-luma-desktop-mvp.md) has completed implementation acceptance and independent review and is archived for merge handoff.
+Persistent settings now cover refresh interval, launch at login, title/path privacy, pin/collapse state, and window geometry. Core macOS persistence/recovery checks passed; Windows device validation is deferred. SQLite usage history now preserves exact decimal observations, supports paginated queries, and provides retention/deletion controls. See [usage history](docs/integrations/usage-history.md). The approved [MVP plan records](docs/plans) has completed implementation acceptance and independent review and is archived for merge handoff.
 
 ## Development
 

@@ -27,7 +27,7 @@ The Rust backend now implements device authorization, interval/expiry enforcemen
 
 OAuth bearer tokens are accepted even when lifecycle metadata is present. Positive expires_in values are converted to an expiry timestamp and stored with the access token in the OS credential store; absent, null, or zero lifetimes do not establish a positive expiry and remain subject to server-side validation. The app requests reconnection on known expiry or HTTP 401. Refresh tokens are neither persisted nor used; no undocumented refresh is attempted. Legacy plain-token credential entries remain readable. This fixes an overly strict parser that rejected valid responses solely for including lifecycle fields; the earlier probe had not established that lifecycle fields were absent. The app does not depend on GitHub CLI or jq. Successful fresh polls persist immutable account-scoped observations in SQLite. Current cache is a rebuildable projection; cached/304 provider replies preserve the original observation without creating history. See [usage history](usage-history.md).
 
-Native Rust tests and compilation pass on macOS. A real new login through the desktop UI, secure-store interaction/restart recovery, network-failure UI, and Windows execution remain to be tested. The earlier device-flow probe's token was intentionally not retained, so the desktop requires its own sign-in.
+Native Rust tests and compilation pass on macOS. Installed-app new sign-in, secure-store restoration, cache clearing, disconnect, restart and network recovery are now verified in the macOS acceptance record. Windows execution is deferred. The original feasibility probe did not retain its token; the accepted desktop sign-in used its own authorization.
 
 ## Provider Timing and Freshness
 

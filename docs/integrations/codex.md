@@ -51,7 +51,7 @@ This also reconciles orphan records created by older Luma builds. Typical remova
 
 Rust tests cover normalization, configuration merge/install/remove and malformed-file preservation, decimal-free metadata persistence, state ordering/dedup, parallel waits, restart, retention, and concurrent SQLite reads. UI tests cover status ordering/privacy and explicit setup/removal/deletion. A native executable smoke test injects synthetic stdin events into a temporary database and verifies running → waiting → running → stopped plus cancellation, disabled collection, malformed input, and no prompt/body retention.
 
-Validation currently passes 73 Rust tests, 24 UI component tests, eight Node tests, frontend build, strict clippy, and plan lint.
+Final repair validation passes 84 Rust tests, 27 UI component tests, eight Node tests, frontend build, strict clippy, and plan lint.
 
 These automated/synthetic checks do not establish that the current Codex desktop has loaded and trusted the handlers. The user subsequently verified real macOS Waiting and Turn stopped, with Waiting also observed through the installed database and Accessibility tree. See the macOS acceptance report. Windows is deferred; final-success/failure classification is outside the approved five-state MVP. AC1/AC6 are not marked complete from fixtures. The official reference is [Codex Hooks](https://developers.openai.com/codex/hooks); the installed protocol schema confirms all eight event names and command handler fields.
 
