@@ -284,6 +284,8 @@ Adapters parse raw data, domain handles metrics and session state, services mana
 
 ## Deferred Items
 
+Follow-up tracker: https://github.com/yew/luma/issues/1. All items below are outside this macOS candidate.
+
 - Reliable final-success/failure classification beyond the five approved Codex hook states. The current UI must not label Stop as successful completion.
 - Windows support validation and delivery: NSIS packaging, Credential Manager, Hooks execution, window/tray behavior, proxy, recovery, and login startup. Existing implementation and build configuration are retained; no Windows support claim is made for this macOS MVP.
 - Use manual upgrades initially. Additional providers/agents, configurable completion notifications, historical trend charts/analytics UI, cost forecasting, and automatic updates are deferred. History collection, compatible storage, retention, and range queries are part of this MVP.
