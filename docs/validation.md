@@ -4,13 +4,13 @@ This is the current evidence record and a repeatable manual checklist, not a rel
 
 ## Latest macOS Device Pass
 
-See [macOS installed-app acceptance, 2026-09-26](validation/macos-2026-09-26.md) for the actual installed release, UI interactions, monitor removal, sleep/wake, persisted settings, and remaining login/network checks. Earlier baseline sections below retain their original scope.
+See [macOS installed-app acceptance, 2026-09-26](validation/macos-2026-09-26.md) for the actual installed release, UI interactions, monitor removal, sleep/wake, persisted settings, completed login/network checks, and the current validation scope. Earlier baseline sections below retain their original scope.
 
 ## Platform Evidence
 
 | Platform | Architecture | Evidence | Remaining validation |
 | --- | --- | --- | --- |
-| macOS 26.6.2, build 25G83 | Apple Silicon / arm64 | Existing local frontend and Rust checks/native compilation passed; a visible 360 × 480 native window was observed. Current host version was read on 2026-09-26. | Frontend build, 35 Rust tests, strict clippy, and plan lint pass for the current implementation; unsigned DMG creation/integrity and launch directly from the read-only DMG pass. SQLite schema 2 and default retention initialize. Installed-app interactions, live authorization, and extended performance remain unverified. |
+| macOS 26.6.2, build 25G83 | Apple Silicon / arm64 | Existing local frontend and Rust checks/native compilation passed; a visible 360 × 480 native window was observed. Current host version was read on 2026-09-26. | Frontend build, 35 Rust tests, strict clippy, and plan lint pass for the current implementation; unsigned DMG creation/integrity and launch directly from the read-only DMG pass. SQLite schema 2 and default retention initialize. See the latest installed-app record for verified interactions; live integration coverage remains separately tracked. |
 | macOS 15 (`macos-15` CI runner) | arm64 | Automated validation and DMG job configured; no run result recorded. | CI execution, package installation, and physical-device tests. |
 | macOS 15 (`macos-15-intel` CI runner) | x86_64 | Automated validation and DMG job configured; no run result recorded. | CI execution, package installation, and physical-device tests. |
 | Windows Server 2022 (`windows-2022` CI runner) | x86_64 / MSVC | Automated validation and NSIS job configured; no run result recorded. | CI execution and installer creation. Server build coverage is not Windows desktop validation. |
@@ -39,12 +39,12 @@ Create one record per actual device/package under the local harness runtime root
 ### Installation and Lifecycle
 
 - [ ] Build the matching DMG or NSIS installer and record the package hash and commit.
-- [ ] Install on a clean test account/device; record any unsigned-package trust prompt or block.
+- [ ] Install the package on the supported platform; record any unsigned-package trust prompt or block. A separate clean-user environment is not required.
 - [ ] Launch the installed app without Node.js, Rust, GitHub CLI, or jq.
 - [ ] Confirm the default window is approximately 360 × 480 logical pixels; resize, drag, pin/unpin, and collapse/expand.
 - [ ] Close the window: the process remains available from the tray. Show restores it, and Quit terminates it.
 - [ ] Restart and verify persisted settings, window bounds, collapsed state, and pin preference.
-- [ ] Move between differently scaled displays, unplug the current display, and restart with the old display absent. The window stays reachable.
+- [ ] Move between connected displays, change resolution, unplug the current display, and restart with the old display absent. The window stays reachable.
 - [ ] Enable launch at login, log out/in, then disable it and repeat. Record OS policy restrictions.
 - [ ] Install an upgrade, verify retained preferences and supported database migration, then uninstall. Record which local data and credentials remain and test explicit deletion before uninstall.
 
@@ -79,15 +79,13 @@ These checks are blocked until a supported production Codex observation source i
 - [ ] Confirm keyboard access, visible focus, accessible button labels, readable text, and status text/icons independent of color at supported display scales.
 - [ ] Verify loading, disconnected, healthy, stale, permission, request-failure, unsupported, and demo states are visibly distinct.
 
-## Performance Protocol
+## Validation Scope Adjustment
 
-Performance acceptance remains unmet until measurements are recorded on documented devices. Establish and justify an explicit memory budget from the native desktop baseline before evaluating it; no budget or result is invented here.
+The user canceled dedicated 1×/2× backing-scale switching, isolated clean-user installation/upgrade/uninstall, and long-duration performance/soak tests. These are no longer pending MVP checks, including sustained CPU/memory acceptance budgets. They were not performed and must not be reported as passed. Existing functional platform, installation, recovery, and live-integration requirements remain.
 
-1. Use an installed release build with debug tooling closed. Record device, power mode, displays, account count, session count, refresh interval, and background workload.
-2. Allow five minutes to settle, then sample idle process CPU and memory once per second for ten minutes. Normalize CPU as CPU seconds divided by wall seconds, multiplied by 100, so 100% represents one fully occupied logical core. Include child processes belonging to the app when present; document metric/collection differences between Activity Monitor and Windows tooling.
-3. Record median/95th-percentile CPU, total CPU time, and steady memory. AC9 requires steady idle CPU below 1% of one core. Record any short refresh spikes separately.
-4. Once live observation is available, measure at least 30 source-event-to-render intervals with a monotonic clock and report median, 95th percentile, and maximum. The plan expects typical hook-driven updates within one second; do not substitute polling or demo timings.
-5. Run at least eight hours with ordinary refreshes and representative network loss, sleep/wake, and session activity. Compare memory after equivalent settling periods at start/end and inspect resource counts for unresolved growth. Archive sanitized measurements and a concise result with the measured memory budget.
+Hook-to-dashboard responsiveness remains a functional check under AC9. The measurements below are retained historical evidence, not instructions to resume the canceled tests.
+
+## Historical Performance Evidence
 
 ### Short macOS Baseline (2026-09-26)
 
@@ -102,7 +100,7 @@ Sampling ran from 03:58:48.923 to 04:00:48.975 UTC for 120.05 seconds, with 116 
 | RSS median / 95th percentile / maximum | 94.28 / 98.81 / 104.27 MiB |
 | RSS first / last observation | 104.27 / 87.89 MiB |
 
-CPU counters from `ps` are quantized, so zero interval percentiles do not mean zero CPU work. RSS is resident memory, not macOS physical footprint. A provisional native-parent steady RSS budget of 160 MiB gives approximately 1.5 times the observed short-run maximum, rounded upward, for the fuller checks. This is an engineering budget, not proof that the complete app meets a memory target: separately attribute WebKit GPU/network/content processes and establish the full-application budget before AC9 completion.
+CPU counters from `ps` are quantized, so zero interval percentiles do not mean zero CPU work. RSS is resident memory, not macOS physical footprint. The previously proposed 160 MiB native-parent budget was not validated for the complete application. It is no longer an acceptance target after the user canceled the remaining performance tests; the measured values are retained without a full-application performance claim.
 
 This run had only approximately nine seconds of settling, used a DMG launch rather than an installed app, and did not inspect UI state, account/session counts, refresh configuration, or authentication state. No app interactions were generated; other workstation activity was uncontrolled. Consequently it is not a ten-minute idle pass, an eight-hour growth check, a live-event latency test, or a Windows result. The test-owned process was stopped and the read-only mount detached afterward.
 
@@ -112,7 +110,7 @@ Sanitized samples and context are under `.local/harness/performance/baseline-202
 python3 tools/measure-idle.py --pid <luma-pid> --duration 600 --interval 1 --output .local/harness/performance/idle.json
 ```
 
-It selects the requested process and observable descendants, explicitly excludes unattributed helpers, and does not infer UI state or read process arguments/content. Confirm the workload and helper attribution separately before interpreting an extended result.
+It selects the requested process and observable descendants, explicitly excludes unattributed helpers, and does not infer UI state or read process arguments/content. The sampler is retained as a development utility; no additional run is required by the current plan.
 
 ## Distribution Gate
 
