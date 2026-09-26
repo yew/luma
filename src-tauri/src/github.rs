@@ -140,6 +140,34 @@ fn restore_token(value: &str) -> Result<StoredToken, GitHubError> {
         })
     }
 }
+// Keep OS-store effects behind a narrow boundary so failure paths can be tested
+// without ever reading, overwriting, or deleting a developer's credentials.
+trait CredentialStore: Send + Sync {
+    fn load(&self) -> Result<Option<StoredToken>, GitHubError>;
+    fn save(&self, token: &StoredToken) -> Result<(), GitHubError>;
+    fn delete(&self) -> Result<(), GitHubError>;
+}
+struct SystemCredentialStore;
+impl CredentialStore for SystemCredentialStore {
+    fn load(&self) -> Result<Option<StoredToken>, GitHubError> {
+        match credential()?.get_password() {
+            Ok(value) if !value.is_empty() => restore_token(&value).map(Some),
+            Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
+            Err(_) => Err(GitHubError::storage()),
+        }
+    }
+    fn save(&self, token: &StoredToken) -> Result<(), GitHubError> {
+        credential()?
+            .set_password(&serde_json::to_string(token).map_err(|_| GitHubError::storage())?)
+            .map_err(|_| GitHubError::storage())
+    }
+    fn delete(&self) -> Result<(), GitHubError> {
+        match credential()?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(_) => Err(GitHubError::storage()),
+        }
+    }
+}
 fn token_expiration(raw: &serde_json::Value, now: u64) -> Result<Option<u64>, GitHubError> {
     match raw.get("expires_in") {
         None | Some(serde_json::Value::Null) => Ok(None),
@@ -170,6 +198,13 @@ struct Inner {
     last_successful_poll: Option<Instant>,
 }
 impl Inner {
+    fn authentication_error(&mut self, error: GitHubError) {
+        // An unsuccessful replacement authorization does not change the saved
+        // connection's validity. In particular, it cannot clear a revoked token.
+        if self.token.is_none() {
+            self.error = Some(error);
+        }
+    }
     fn status(&self) -> AuthStatus {
         let state = if self
             .error
@@ -200,6 +235,7 @@ pub struct GitHubService {
     client: RwLock<Client>,
     storage: Arc<Storage>,
     client_id: String,
+    credentials: Arc<dyn CredentialStore>,
     inner: Mutex<Inner>,
     cancel: watch::Sender<u64>,
     restore: Mutex<()>,
@@ -222,6 +258,13 @@ impl GitHubService {
         storage: Arc<Storage>,
         proxy: &crate::network::ProxySettings,
     ) -> Result<Self, GitHubError> {
+        Self::with_credentials(storage, proxy, Arc::new(SystemCredentialStore))
+    }
+    fn with_credentials(
+        storage: Arc<Storage>,
+        proxy: &crate::network::ProxySettings,
+        credentials: Arc<dyn CredentialStore>,
+    ) -> Result<Self, GitHubError> {
         let config: OAuthConfig =
             serde_json::from_str(include_str!("../../config/github-oauth.json")).map_err(|_| {
                 GitHubError::new("configuration", "Invalid GitHub OAuth configuration.")
@@ -243,6 +286,7 @@ impl GitHubService {
             client: RwLock::new(client),
             storage,
             client_id: config.client_id,
+            credentials,
             cancel,
             restore: Mutex::new(()),
             inner: Mutex::new(Inner {
@@ -486,13 +530,10 @@ impl GitHubService {
             if inner.loaded {
                 false
             } else {
-                inner.loaded = true;
-                match credential().and_then(|entry| match entry.get_password() {
-                    Ok(token) if !token.is_empty() => restore_token(&token).map(Some),
-                    Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
-                    Err(_) => Err(GitHubError::storage()),
-                }) {
+                match self.credentials.load() {
                     Ok(token) => {
+                        inner.loaded = true;
+                        inner.error = None;
                         if let Some(account) =
                             token.as_ref().and_then(|token| token.account.clone())
                         {
@@ -571,27 +612,30 @@ impl GitHubService {
         }
         inner.busy = false;
         match result {
-            Ok(response) => {
-                let interval = response.interval.unwrap_or(5);
-                let now = Instant::now();
-                inner.device = Some(DeviceSession {
-                    code: response.device_code,
-                    expires: now + Duration::from_secs(response.expires_in),
-                    interval,
-                    next_poll: now + Duration::from_secs(interval),
-                });
-                inner.error = None;
-                Ok(DeviceAuthorization {
-                    user_code: response.user_code,
-                    verification_uri: response.verification_uri,
-                    expires_in: response.expires_in,
-                    interval,
-                })
-            }
+            Ok(response) => Ok(Self::activate_device(&mut inner, response)),
             Err(error) => {
-                inner.error = Some(error.clone());
+                inner.authentication_error(error.clone());
                 Err(error)
             }
+        }
+    }
+    fn activate_device(inner: &mut Inner, response: DeviceResponse) -> DeviceAuthorization {
+        let interval = response.interval.unwrap_or(5);
+        let now = Instant::now();
+        inner.device = Some(DeviceSession {
+            code: response.device_code,
+            expires: now + Duration::from_secs(response.expires_in),
+            interval,
+            next_poll: now + Duration::from_secs(interval),
+        });
+        if inner.token.is_none() {
+            inner.error = None;
+        }
+        DeviceAuthorization {
+            user_code: response.user_code,
+            verification_uri: response.verification_uri,
+            expires_in: response.expires_in,
+            interval,
         }
     }
     async fn poll(&self) -> Result<PollResult, GitHubError> {
@@ -660,7 +704,7 @@ impl GitHubService {
                         device.next_poll = deadline_after(delay);
                         error.retry_after = Some(delay);
                     }
-                    inner.error = Some(error.clone());
+                    inner.authentication_error(error.clone());
                     return Err(error);
                 }
                 Ok(raw) => raw,
@@ -682,7 +726,7 @@ impl GitHubService {
             }
             inner.device = None;
             let error = oauth_error(code);
-            inner.error = Some(error.clone());
+            inner.authentication_error(error.clone());
             return Err(error);
         }
         let started_at = epoch_millis();
@@ -706,22 +750,28 @@ impl GitHubService {
         let (token, usage) = match result {
             Ok(values) => values,
             Err(error) => {
-                inner.error = Some(error.clone());
+                inner.authentication_error(error.clone());
                 return Err(error);
             }
         };
+        self.complete_sign_in(&mut inner, &collection_id, started_at, token, usage)
+    }
+    fn complete_sign_in(
+        &self,
+        inner: &mut Inner,
+        collection_id: &str,
+        started_at: u64,
+        token: StoredToken,
+        usage: ValidatedUsage,
+    ) -> Result<PollResult, GitHubError> {
         // Serialize credential mutation with disconnect so late responses cannot restore a deleted token.
-        if let Err(error) = credential().and_then(|entry| {
-            entry
-                .set_password(&serde_json::to_string(&token).map_err(|_| GitHubError::storage())?)
-                .map_err(|_| GitHubError::storage())
-        }) {
-            inner.error = Some(error.clone());
+        if let Err(error) = self.credentials.save(&token) {
+            inner.authentication_error(error.clone());
             return Err(error);
         }
         inner.token = Some(token);
         inner.loaded = true;
-        self.apply_usage(&mut inner, &collection_id, started_at, usage, None);
+        self.apply_usage(inner, collection_id, started_at, usage, None);
         Ok(PollResult {
             state: "connected".into(),
             retry_after: None,
@@ -782,21 +832,35 @@ impl GitHubService {
             return Err(GitHubError::cancelled());
         }
         inner.busy = false;
+        self.finish_refresh(&mut inner, &collection_id, started_at, &token, result)
+    }
+    fn finish_refresh(
+        &self,
+        inner: &mut Inner,
+        collection_id: &str,
+        started_at: u64,
+        token: &StoredToken,
+        result: Result<ValidatedUsage, GitHubError>,
+    ) -> Result<CopilotSnapshot, GitHubError> {
+        // Identity failures follow the same collection outcome and scheduling
+        // path as HTTP/schema failures; otherwise each background tick retries.
+        let result = result.and_then(|usage| {
+            if inner
+                .account
+                .as_ref()
+                .is_some_and(|old| old.id != usage.account.id)
+            {
+                Err(GitHubError::new(
+                    "identity_mismatch",
+                    "GitHub identity changed. Reconnect before collecting usage.",
+                ))
+            } else {
+                Ok(usage)
+            }
+        });
         match result {
             Ok(usage) => {
                 let account = &usage.account;
-                if inner
-                    .account
-                    .as_ref()
-                    .is_some_and(|old| old.id != account.id)
-                {
-                    let error = GitHubError::new(
-                        "identity_mismatch",
-                        "GitHub identity changed. Reconnect before collecting usage.",
-                    );
-                    inner.error = Some(error.clone());
-                    return Err(error);
-                }
                 // Upgrade legacy credentials with verified identity for account-scoped offline restore.
                 let credential_error = if token
                     .account
@@ -807,35 +871,24 @@ impl GitHubService {
                         account: Some(account.clone()),
                         ..token.clone()
                     };
-                    credential()
-                        .and_then(|entry| {
-                            entry
-                                .set_password(
-                                    &serde_json::to_string(&updated)
-                                        .map_err(|_| GitHubError::storage())?,
-                                )
-                                .map_err(|_| GitHubError::storage())
-                        })
-                        .err()
+                    self.credentials.save(&updated).err()
                 } else {
                     None
                 };
-                if let Some(saved_token) = inner.token.as_mut() {
-                    saved_token.account = Some(account.clone());
+                // Reflect only metadata that reached the credential store. A
+                // failed upgrade must remain eligible for the next fresh poll.
+                if credential_error.is_none() {
+                    if let Some(saved_token) = inner.token.as_mut() {
+                        saved_token.account = Some(account.clone());
+                    }
                 }
-                self.apply_usage(
-                    &mut inner,
-                    &collection_id,
-                    started_at,
-                    usage,
-                    credential_error,
-                )
-                .ok_or_else(cached_response_error)
+                self.apply_usage(inner, collection_id, started_at, usage, credential_error)
+                    .ok_or_else(cached_response_error)
             }
             Err(mut error) => {
                 if let Some(account) = &inner.account {
                     let _ = self.storage.record_failure(
-                        &collection_id,
+                        collection_id,
                         &account_key(account),
                         started_at,
                         epoch_millis(),
@@ -907,10 +960,7 @@ impl GitHubService {
         inner.next_refresh = None;
         inner.last_successful_poll = None;
         inner.failures = 0;
-        let deletion = credential().and_then(|entry| match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(_) => Err(GitHubError::storage()),
-        });
+        let deletion = self.credentials.delete();
         match deletion {
             Ok(()) => {
                 inner.error = None;
@@ -1327,6 +1377,353 @@ mod tests {
             "quota_snapshots":{"premium_interactions":{"entitlement":2000000,"credits_used":722342,
             "quota_remaining":1277551.1,"percent_remaining":63.8,"overage_permitted":true}}})
     }
+    #[derive(Default)]
+    struct FakeCredentials {
+        state: std::sync::Mutex<FakeCredentialState>,
+    }
+    #[derive(Default)]
+    struct FakeCredentialState {
+        token: Option<StoredToken>,
+        fail_load: bool,
+        fail_save: bool,
+        fail_delete: bool,
+        loads: usize,
+        saves: usize,
+        deletes: usize,
+    }
+    impl CredentialStore for FakeCredentials {
+        fn load(&self) -> Result<Option<StoredToken>, GitHubError> {
+            let mut state = self.state.lock().unwrap();
+            state.loads += 1;
+            if state.fail_load {
+                Err(GitHubError::storage())
+            } else {
+                Ok(state.token.clone())
+            }
+        }
+        fn save(&self, token: &StoredToken) -> Result<(), GitHubError> {
+            let mut state = self.state.lock().unwrap();
+            state.saves += 1;
+            if state.fail_save {
+                Err(GitHubError::storage())
+            } else {
+                state.token = Some(token.clone());
+                Ok(())
+            }
+        }
+        fn delete(&self) -> Result<(), GitHubError> {
+            let mut state = self.state.lock().unwrap();
+            state.deletes += 1;
+            if state.fail_delete {
+                Err(GitHubError::storage())
+            } else {
+                state.token = None;
+                Ok(())
+            }
+        }
+    }
+    fn fake_service() -> (GitHubService, Arc<FakeCredentials>) {
+        let credentials = Arc::new(FakeCredentials::default());
+        let service = GitHubService::with_credentials(
+            Arc::new(Storage::in_memory().unwrap()),
+            &crate::network::ProxySettings {
+                mode: crate::network::ProxyMode::Direct,
+                server: String::new(),
+            },
+            credentials.clone(),
+        )
+        .unwrap();
+        (service, credentials)
+    }
+    fn test_token(account: Account) -> StoredToken {
+        StoredToken {
+            access_token: "test-only-never-sent".into(),
+            expires_at: None,
+            account: Some(account),
+        }
+    }
+    fn test_device() -> DeviceResponse {
+        DeviceResponse {
+            device_code: "test-device-never-sent".into(),
+            user_code: "TEST-CODE".into(),
+            verification_uri: "https://github.com/login/device".into(),
+            expires_in: 60,
+            interval: Some(5),
+        }
+    }
+    fn test_usage(account: Account, fetched_at: u64) -> ValidatedUsage {
+        let mut raw = fixture();
+        raw["login"] = json!(account.login);
+        ValidatedUsage {
+            snapshot: Some(project_copilot(raw, &account, fetched_at).unwrap()),
+            account,
+            cache_delay: 0,
+        }
+    }
+    #[tokio::test]
+    async fn locked_credential_store_can_be_retried_without_restart_or_network() {
+        let (service, credentials) = fake_service();
+        let mut expired = test_token(account());
+        expired.expires_at = Some(1); // Any accidental request is blocked locally.
+        {
+            let mut state = credentials.state.lock().unwrap();
+            state.token = Some(expired);
+            state.fail_load = true;
+        }
+        let unavailable = service.status().await;
+        assert_eq!(unavailable.state, "error");
+        assert_eq!(unavailable.error.unwrap().code, "secure_storage");
+        assert!(!service.inner.lock().await.loaded);
+        credentials.state.lock().unwrap().fail_load = false;
+        let restored = service.status().await;
+        assert_eq!(restored.state, "reauth_required");
+        assert_eq!(restored.account.unwrap().id, account().id);
+        assert_eq!(credentials.state.lock().unwrap().loads, 2);
+        assert!(service.inner.lock().await.loaded);
+        assert_eq!(service.status().await.state, "reauth_required");
+        assert_eq!(credentials.state.lock().unwrap().loads, 2);
+    }
+    #[tokio::test]
+    async fn retrying_unlocked_empty_store_clears_old_storage_error() {
+        let (service, credentials) = fake_service();
+        credentials.state.lock().unwrap().fail_load = true;
+        assert_eq!(service.status().await.state, "error");
+        credentials.state.lock().unwrap().fail_load = false;
+        let recovered = service.status().await;
+        assert_eq!(recovered.state, "disconnected");
+        assert!(recovered.error.is_none());
+        assert!(service.inner.lock().await.loaded);
+    }
+    #[tokio::test]
+    async fn cancelled_or_failed_reconnect_preserves_revoked_connection_and_snapshot() {
+        let (service, _) = fake_service();
+        {
+            let mut inner = service.inner.lock().await;
+            inner.loaded = true;
+            inner.token = Some(test_token(account()));
+            inner.account = Some(account());
+            inner.snapshot = test_usage(account(), 100).snapshot;
+            inner.error = Some(GitHubError::new("reauth_required", "Reconnect GitHub."));
+            GitHubService::activate_device(&mut inner, test_device());
+            assert_eq!(inner.status().state, "reauth_required");
+            for code in [
+                "authorization_denied",
+                "network",
+                "permission_denied",
+                "secure_storage",
+            ] {
+                inner.authentication_error(GitHubError::new(code, "Replacement sign-in failed."));
+                assert_eq!(inner.status().state, "reauth_required");
+                assert_eq!(inner.snapshot.as_ref().unwrap().fetched_at, 100);
+            }
+        }
+        service.cancel().await;
+        assert_eq!(service.status().await.state, "reauth_required");
+        assert_eq!(service.refresh().await.unwrap_err().code, "reauth_required");
+        assert!(service.inner.lock().await.device.is_none());
+    }
+    #[tokio::test]
+    async fn secure_store_save_failure_never_commits_replacement_identity_or_usage() {
+        let (service, credentials) = fake_service();
+        let original_token = test_token(account());
+        credentials.state.lock().unwrap().token = Some(original_token.clone());
+        credentials.state.lock().unwrap().fail_save = true;
+        let replacement = Account {
+            id: 84,
+            login: "another".into(),
+        };
+        let now = epoch_millis();
+        let mut inner = service.inner.lock().await;
+        inner.token = Some(original_token);
+        inner.account = Some(account());
+        inner.snapshot = test_usage(account(), now).snapshot;
+        inner.error = Some(GitHubError::new("reauth_required", "Reconnect GitHub."));
+        let result = service.complete_sign_in(
+            &mut inner,
+            "replacement-failed",
+            now,
+            test_token(replacement.clone()),
+            test_usage(replacement.clone(), now),
+        );
+        assert_eq!(result.err().unwrap().code, "secure_storage");
+        assert_eq!(inner.status().state, "reauth_required");
+        assert_eq!(inner.account.as_ref().unwrap().id, account().id);
+        assert_eq!(inner.snapshot.as_ref().unwrap().account_id, account().id);
+        assert!(service
+            .storage
+            .latest(&account_key(&replacement))
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            credentials
+                .state
+                .lock()
+                .unwrap()
+                .token
+                .as_ref()
+                .unwrap()
+                .account
+                .as_ref()
+                .unwrap()
+                .id,
+            account().id
+        );
+        // An initial connection cannot claim success either.
+        inner.token = None;
+        inner.account = None;
+        inner.snapshot = None;
+        inner.error = None;
+        let result = service.complete_sign_in(
+            &mut inner,
+            "initial-failed",
+            now,
+            test_token(replacement.clone()),
+            test_usage(replacement, now),
+        );
+        assert_eq!(result.err().unwrap().code, "secure_storage");
+        assert_eq!(inner.status().state, "error");
+        assert!(inner.token.is_none());
+        assert!(inner.snapshot.is_none());
+    }
+    #[tokio::test]
+    async fn disconnect_store_failure_stays_disconnected_and_deletion_can_be_retried() {
+        let (service, credentials) = fake_service();
+        {
+            let mut state = credentials.state.lock().unwrap();
+            state.token = Some(test_token(account()));
+            state.fail_delete = true;
+        }
+        {
+            let mut inner = service.inner.lock().await;
+            inner.loaded = true;
+            inner.token = Some(test_token(account()));
+            inner.account = Some(account());
+            inner.snapshot = test_usage(account(), 100).snapshot;
+            GitHubService::activate_device(&mut inner, test_device());
+        }
+        let (_, mut cancellation) = service.reserve().await.unwrap();
+        assert_eq!(
+            service.disconnect().await.err().unwrap().code,
+            "secure_storage"
+        );
+        assert!(cancellation.changed().await.is_ok());
+        let status = service.status().await;
+        assert_eq!(status.state, "error");
+        assert!(status.account.is_none());
+        assert!(status.snapshot.is_none());
+        assert_eq!(credentials.state.lock().unwrap().loads, 0);
+        assert!(!service.inner.lock().await.busy);
+        credentials.state.lock().unwrap().fail_delete = false;
+        assert_eq!(service.disconnect().await.unwrap().state, "disconnected");
+        assert!(credentials.state.lock().unwrap().token.is_none());
+        assert_eq!(credentials.state.lock().unwrap().deletes, 2);
+    }
+    #[tokio::test]
+    async fn changed_refresh_identity_uses_failure_backoff_and_keeps_last_usage() {
+        let (service, credentials) = fake_service();
+        let original_token = test_token(account());
+        let replacement = Account {
+            id: 84,
+            login: "another".into(),
+        };
+        let now = epoch_millis();
+        let mut inner = service.inner.lock().await;
+        inner.token = Some(original_token.clone());
+        inner.account = Some(account());
+        inner.snapshot = test_usage(account(), now).snapshot;
+        for (id, delay) in [("identity-first", 600), ("identity-second", 1200)] {
+            let error = service
+                .finish_refresh(
+                    &mut inner,
+                    id,
+                    now,
+                    &original_token,
+                    Ok(test_usage(replacement.clone(), now)),
+                )
+                .unwrap_err();
+            assert_eq!(error.code, "identity_mismatch");
+            assert_eq!(error.retry_after, Some(delay));
+            assert!(
+                inner
+                    .next_refresh
+                    .unwrap()
+                    .duration_since(Instant::now())
+                    .as_secs()
+                    >= delay - 1
+            );
+            assert_eq!(inner.account.as_ref().unwrap().id, account().id);
+            assert_eq!(inner.snapshot.as_ref().unwrap().account_id, account().id);
+        }
+        assert_eq!(inner.failures, 2);
+        assert_eq!(credentials.state.lock().unwrap().saves, 0);
+        assert!(service
+            .storage
+            .latest(&account_key(&replacement))
+            .unwrap()
+            .is_none());
+        drop(inner);
+        assert_eq!(service.refresh().await.unwrap_err().code, "cooldown");
+    }
+
+    #[tokio::test]
+    async fn failed_legacy_identity_upgrade_keeps_usage_and_retries_secure_storage() {
+        let (service, credentials) = fake_service();
+        let legacy = StoredToken {
+            account: None,
+            ..test_token(account())
+        };
+        {
+            let mut state = credentials.state.lock().unwrap();
+            state.token = Some(legacy.clone());
+            state.fail_save = true;
+        }
+        let mut inner = service.inner.lock().await;
+        inner.token = Some(legacy.clone());
+        let now = epoch_millis();
+        let first = service
+            .finish_refresh(
+                &mut inner,
+                "legacy-first",
+                now,
+                &legacy,
+                Ok(test_usage(account(), now)),
+            )
+            .unwrap();
+        assert_eq!(first.account_id, account().id);
+        assert_eq!(inner.error.as_ref().unwrap().code, "secure_storage");
+        assert!(inner.token.as_ref().unwrap().account.is_none());
+        assert_eq!(inner.account.as_ref().unwrap().id, account().id);
+        assert!(service
+            .storage
+            .latest(&account_key(&account()))
+            .unwrap()
+            .is_some());
+        credentials.state.lock().unwrap().fail_save = false;
+        let retry_token = inner.token.clone().unwrap();
+        let next = now + 1;
+        service
+            .finish_refresh(
+                &mut inner,
+                "legacy-retry",
+                next,
+                &retry_token,
+                Ok(test_usage(account(), next)),
+            )
+            .unwrap();
+        assert!(inner.error.is_none());
+        assert_eq!(inner.snapshot.as_ref().unwrap().fetched_at, next);
+        assert_eq!(
+            inner.token.as_ref().unwrap().account.as_ref().unwrap().id,
+            account().id
+        );
+        let state = credentials.state.lock().unwrap();
+        assert_eq!(state.saves, 2);
+        assert_eq!(
+            state.token.as_ref().unwrap().account.as_ref().unwrap().id,
+            account().id
+        );
+    }
+
     #[tokio::test]
     async fn proxy_replacement_applies_to_oauth_and_preserves_old_client_on_save_failure() {
         use std::io::{Read, Write};

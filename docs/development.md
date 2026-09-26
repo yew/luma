@@ -54,13 +54,14 @@ Proxy validation: local HTTP CONNECT tests cover GitHub API and OAuth routing, a
 npm ci
 npm run build
 npm test
+npm run test:ui
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 cargo check --manifest-path src-tauri/Cargo.toml --locked --all-targets
 cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets
 ```
 
-`npm run build` checks TypeScript and bundles the frontend. `npm test` runs the repository's Node test suites. Rust checks cover the native backend. Desktop interaction, authorization, and recovery require the manual checks in [validation.md](validation.md).
+`npm run build` checks TypeScript and bundles the frontend. `npm test` runs Node domain/diagnostic tests and Vitest component interaction tests. The component suite uses a mocked native bridge and fake clocks; it is not native-device acceptance evidence. Rust checks cover the native backend. Desktop interaction, authorization, and recovery require the manual checks in [validation.md](validation.md).
 
 ## Unsigned Validation Packages
 
@@ -115,3 +116,9 @@ Disposable logs, screenshots, and measurements belong under the local runtime ro
 Collapse reduces the native dashboard to 240 logical pixels high. Moving the compact window updates position while retaining the expanded dimensions. Opening Settings expands temporarily; closing Settings restores the compact view. Expanding and tray recovery clamp geometry to connected monitor work areas using the destination monitor DPI. Privacy and collapsed preferences remain persisted independently.
 
 Usage status labels include freshness and error categories. Manual refresh shows a countdown from the backend's actual cooldown/provider deadline; switching accounts cannot inherit an earlier account's local retry fallback.
+
+## Recovery Regression Coverage
+
+Component tests exercise rendered Settings proxy save/failure, account-scoped history confirmation and disconnect, authentication cancellation with late replies, failed subscription recovery, remount state synchronization, backend retry deadlines, secure-storage retry, and preference startup ordering. Browser preview shows Disconnected without attempting native commands. CI runs these development-only tests through npm test; test libraries are not shipped in the application.
+
+Native credential storage has a replaceable test boundary, with production still using only the OS credential store. Deterministic tests simulate locked/unlocked, failed save/delete, expired credentials, canceled reconnect, mismatched account identity, and retrying failed legacy metadata persistence. No test reads or modifies a developer's real credentials. Live sign-in and cross-platform credential-store interactions remain separate acceptance checks.

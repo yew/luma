@@ -24,6 +24,10 @@ No tested minimum OS version is established. Windows ARM64 and universal macOS p
 
 The continued implementation passes frontend bundling, eight Node state/diagnostic tests, 47 Rust tests, and strict clippy. Native tests cover HTTP cache-only responses, provider retry dates/reset limits, immutable history, proxy routing, and compact-window geometry. Device interaction remains separate from these deterministic checks. The short resource baseline below measures the earlier packaged commit, not the new UI timers.
 
+## Component and Secure-Storage Recovery Pass
+
+The current pass succeeds with 54 Rust tests, eight Node tests, 14 Vitest component tests, frontend production build, and strict clippy. Vitest component tests run through npm test alongside Node domain tests. They exercise Settings and GitHub UI actions with a mocked Tauri bridge, including failed/late requests and fake-clock retry timing. Native credential tests use a fake store for read/write/delete failures and recovery; no real stored credentials are accessed. This expands repeatable regression coverage without claiming installed-app, macOS/Windows credential-store, or live Codex acceptance.
+
 ## Manual Test Record
 
 Create one record per actual device/package under the local harness runtime root. Include test date, commit, OS/build, CPU model/architecture, memory, display scale, monitor arrangement, package filename, credential-store availability, and the exact tests run. Use pass/fail/blocked with a reason; keep unchecked checks incomplete. Do not record secrets or conversation content.

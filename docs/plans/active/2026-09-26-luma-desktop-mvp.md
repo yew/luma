@@ -46,6 +46,8 @@ Implementation is underway from an initially empty workspace. Native Copilot acc
 - A 120-second macOS release baseline measured native-parent CPU at 0.042% of one core and maximum RSS at 104.27 MiB; provisional parent RSS budget is 160 MiB. Unattributed WebKit helpers, short settling, and unknown UI configuration prevent full AC9 acceptance. See docs/validation.md.
 - A new read-only Codex audit confirms the default daemon control socket is absent and local metadata has no runtime/waiting status. Existing desktop waiting/resume observation still needs a supported owning endpoint; no production status is inferred from private IPC or incomplete files.
 
+- The next validation pass adds Vitest component tests for actual proxy/history/authentication controls and repairs stale remount state, failed event-subscription recovery, and late startup settings overwrites. Native fake-store tests cover locked-store retries, replacement/deletion failures, canceled reconnect preserving reauthentication, legacy metadata retry, and identity-mismatch backoff. This pass succeeds with 54 Rust tests, eight Node tests, 14 component tests, frontend build, strict clippy, and plan lint. Native device and Codex waiting-state acceptance remain unmet.
+
 ### Delivery Estimates
 
 These are rough estimates for one developer familiar with the stack, subject to integration validation. Signing credential applications and external review time are additional.

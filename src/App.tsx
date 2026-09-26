@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { GitHubUsage, type Auth } from './GitHubUsage';
 import { Settings, defaultPreferences, type Preferences } from './Settings';
 import { HistorySettings } from './HistorySettings';
@@ -15,6 +15,8 @@ const samples = [
 
 export function App() {
   const [demo, setDemo] = useState(false);
+  const preferenceVersion = useRef(0);
+  const preferenceWrites = useRef<Promise<void>>(Promise.resolve());
   const [preferences, setPreferences] = useState<Preferences>(defaultPreferences);
   const [clock, setClock] = useState(Date.now());
   useEffect(() => { const timer = setInterval(() => setClock(Date.now()), 15000); return () => clearInterval(timer); }, []);
@@ -28,13 +30,25 @@ export function App() {
   }, [collapsed, settings]);
   useEffect(() => {
     if (!isTauri()) return;
-    void invoke<Preferences>('get_preferences').then(setPreferences).catch(() => setMessage('Unable to load saved preferences.'));
+    let alive = true;
+    const version = preferenceVersion.current;
+    void invoke<Preferences>('get_preferences').then(value => { if (alive && version === preferenceVersion.current) setPreferences(value); }).catch(() => { if (alive) setMessage('Unable to load saved preferences.'); });
     const errors = listen<string>('preferences-error', event => setMessage(event.payload));
-    return () => { void errors.then(unlisten => unlisten()).catch(() => {}); };
+    return () => { alive = false; void errors.then(unlisten => unlisten()).catch(() => {}); };
   }, []);
-  async function updatePreferences(patch: Partial<Preferences>) {
-    if (isTauri()) setPreferences(await invoke<Preferences>('update_preferences', { patch }));
-    else setPreferences(previous => ({ ...previous, ...patch }));
+  function updatePreferences(patch: Partial<Preferences>): Promise<void> {
+    const version = ++preferenceVersion.current;
+    const write = preferenceWrites.current.catch(() => {}).then(async () => {
+      if (isTauri()) {
+        try { setPreferences(await invoke<Preferences>('update_preferences', { patch })); }
+        catch (error) {
+          try { const restored = await invoke<Preferences>('get_preferences'); if (version === preferenceVersion.current) setPreferences(restored); } catch {}
+          throw error;
+        }
+      } else setPreferences(previous => ({ ...previous, ...patch }));
+    });
+    preferenceWrites.current = write;
+    return write;
   }
   const change = (patch: Partial<Preferences>) => void updatePreferences(patch).catch(() => setMessage('Unable to save preferences.'));
   return <main className="dashboard">

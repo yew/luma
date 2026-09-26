@@ -11,12 +11,6 @@ type Poll = { state: 'pending'|'connected'; retry_after: number|null; status: Au
 const errorMessage = (error: unknown) => typeof error === 'object' && error && 'message' in error ? String(error.message) : 'Unable to connect to GitHub.';
 const number = (value: number|null) => value == null ? 'Unknown' : value.toLocaleString(undefined, { maximumFractionDigits: 4 });
 
-let initialStatus: Promise<Auth> | null = null;
-function restoreStatus() {
-  initialStatus ??= invoke<Auth>('github_status');
-  return initialStatus;
-}
-
 export function GitHubUsage({ onStatus, refreshIntervalSeconds = 300 }: { onStatus?: (status: Auth) => void; refreshIntervalSeconds?: number }) {
   const [auth, setAuth] = useState<Auth|null>(null);
   const [device, setDevice] = useState<Device|null>(null);
@@ -37,6 +31,11 @@ export function GitHubUsage({ onStatus, refreshIntervalSeconds = 300 }: { onStat
     const previousError = error; const previousCode = failureCode;
     setBusy(true); setLocalDeadline(Date.now() + 30_000);
     try {
+      if (auth?.state === 'error' && !auth.account) {
+        const restored = await invoke<Auth>('github_status');
+        applyStatus(restored);
+        if (restored.state !== 'error' || restored.error?.code === 'secure_storage' || (restored.next_refresh_at ?? 0) > Date.now()) return;
+      }
       const snapshot = await invoke<Snapshot>('github_refresh');
       void snapshot;
       const status = await invoke<Auth>('github_status');
@@ -49,20 +48,33 @@ export function GitHubUsage({ onStatus, refreshIntervalSeconds = 300 }: { onStat
       void invoke<Auth>('github_status').then(applyStatus).catch(() => {});
     }
     finally { setBusy(false); }
-  }, [applyStatus, error, failureCode]);
+  }, [applyStatus, auth, error, failureCode]);
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isTauri()) { setAuth({ revision: 0, next_refresh_at: null, state: 'disconnected', account: null, snapshot: null, error: null }); return; }
     let alive = true;
-    let received = false;
-    const subscription = listen<Auth>('github-status', event => {
-      received = true;
-      if (alive) { applyStatus(event.payload); }
-    });
-    subscription.then(() => restoreStatus()).then(status => { if (alive && !received) { applyStatus(status); } }).catch(error => { if (alive) { setError(errorMessage(error)); setFailureCode((error as Failure)?.code); } });
-    const synchronize = () => void invoke<Auth>('github_status').then(status => { if (alive) { applyStatus(status); } }).catch(error => { if (alive) { setError(errorMessage(error)); setFailureCode((error as Failure)?.code); } });
-    window.addEventListener('focus', synchronize);
-    return () => { alive = false; clearPoll(); window.removeEventListener('focus', synchronize); void subscription.then(unlisten => unlisten()); };
-  }, []);
+    let listening = false;
+    let subscribing = false;
+    let unsubscribe: (() => void) | undefined;
+    const subscribe = async () => {
+      if (listening || subscribing || !alive) return;
+      subscribing = true;
+      try {
+        const stop = await listen<Auth>('github-status', event => { if (alive) applyStatus(event.payload); });
+        if (!alive) stop(); else { unsubscribe = stop; listening = true; }
+      } catch { /* A snapshot can still be read; retry subscription on focus. */ }
+      finally { subscribing = false; }
+    };
+    const synchronize = async () => {
+      await subscribe();
+      if (!alive) return;
+      try { const status = await invoke<Auth>('github_status'); if (alive) applyStatus(status); }
+      catch (failure) { if (alive) { setError(errorMessage(failure)); setFailureCode((failure as Failure)?.code); } }
+    };
+    void synchronize();
+    const onFocus = () => { void synchronize(); };
+    window.addEventListener('focus', onFocus);
+    return () => { alive = false; clearPoll(); window.removeEventListener('focus', onFocus); unsubscribe?.(); };
+  }, [applyStatus]);
   useEffect(() => { if (auth) onStatus?.(auth); }, [auth, onStatus]);
   useEffect(() => {
     const tick = setInterval(() => setNow(Date.now()), auth && ((auth.next_refresh_at ?? 0) > Date.now() || localDeadline > Date.now()) ? 1000 : 15000);
