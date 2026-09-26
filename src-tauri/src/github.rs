@@ -1110,8 +1110,17 @@ fn cache_policy(headers: &HeaderMap, now: SystemTime) -> CachePolicy {
 }
 
 fn refresh_retry_delay(failures: u32, provider_delay: Option<u64>) -> u64 {
-    let exponential = 300_u64.saturating_mul(1_u64 << failures.min(4)).min(3600);
-    provider_delay.unwrap_or(0).max(exponential)
+    // Brief network interruptions get three quick retries before backing off.
+    // This schedule is independent of the normal usage polling interval.
+    let delay = match failures {
+        0..=3 => 5,
+        4 => 15,
+        5 => 30,
+        6 => 60,
+        7 => 120,
+        _ => 300,
+    };
+    provider_delay.unwrap_or(0).max(delay)
 }
 fn history_error() -> GitHubError {
     GitHubError::new(
@@ -1631,7 +1640,7 @@ mod tests {
         inner.token = Some(original_token.clone());
         inner.account = Some(account());
         inner.snapshot = test_usage(account(), now).snapshot;
-        for (id, delay) in [("identity-first", 600), ("identity-second", 1200)] {
+        for (id, delay) in [("identity-first", 5), ("identity-second", 5)] {
             let error = service
                 .finish_refresh(
                     &mut inner,
@@ -2178,9 +2187,73 @@ mod tests {
         assert!(status.next_refresh_at.unwrap() >= epoch_millis() + 7_199_000);
     }
 
+    #[tokio::test]
+    async fn transient_failure_retries_quickly_and_success_resets_the_streak() {
+        let (service, _) = fake_service();
+        let token = test_token(account());
+        let mut inner = service.inner.lock().await;
+        inner.token = Some(token.clone());
+        inner.account = Some(account());
+        let timestamp = epoch_millis();
+        inner.snapshot = test_usage(account(), timestamp).snapshot;
+        for (index, delay) in [5, 5, 5, 15, 30, 60, 120, 300].into_iter().enumerate() {
+            let error = service
+                .finish_refresh(
+                    &mut inner,
+                    &format!("retry-{index}"),
+                    timestamp,
+                    &token,
+                    Err(GitHubError::new("network", "Network unavailable")),
+                )
+                .unwrap_err();
+            assert_eq!(error.retry_after, Some(delay));
+            assert_eq!(inner.snapshot.as_ref().unwrap().fetched_at, timestamp);
+            let remaining = inner
+                .next_refresh
+                .unwrap()
+                .saturating_duration_since(Instant::now());
+            assert!(remaining <= Duration::from_secs(delay));
+            assert!(remaining > Duration::from_secs(delay - 1));
+        }
+        service
+            .finish_refresh(
+                &mut inner,
+                "recovered",
+                timestamp,
+                &token,
+                Ok(test_usage(account(), timestamp)),
+            )
+            .unwrap();
+        assert_eq!(inner.failures, 0);
+        assert!(inner.error.is_none());
+        let error = service
+            .finish_refresh(
+                &mut inner,
+                "new-interruption",
+                timestamp,
+                &token,
+                Err(GitHubError::new("network", "Network unavailable")),
+            )
+            .unwrap_err();
+        assert_eq!(error.retry_after, Some(5));
+        drop(inner);
+        assert_eq!(service.refresh().await.unwrap_err().code, "cooldown");
+    }
+
     #[test]
     fn short_provider_hints_cannot_shorten_failure_backoff() {
-        for (failures, expected) in [(1, 600), (2, 1200), (3, 2400), (4, 3600), (100, 3600)] {
+        for (failures, expected) in [
+            (1, 5),
+            (2, 5),
+            (3, 5),
+            (4, 15),
+            (5, 30),
+            (6, 60),
+            (7, 120),
+            (8, 300),
+            (100, 300),
+            (u32::MAX, 300),
+        ] {
             assert_eq!(refresh_retry_delay(failures, None), expected);
             assert_eq!(refresh_retry_delay(failures, Some(1)), expected);
             assert_eq!(refresh_retry_delay(failures, Some(7200)), 7200);

@@ -145,7 +145,7 @@ describe('GitHub connection lifecycle', () => {
     let current = connected();
     bridge.invoke.mockImplementation(async command => {
       if (command === 'github_status') return current;
-      if (command === 'github_refresh') { current = { ...connected(5), next_refresh_at: Date.now() + 600000, error: { code: 'network', message: 'Offline', retry_after: 600 } }; throw current.error; }
+      if (command === 'github_refresh') { current = { ...connected(5), next_refresh_at: Date.now() + 5000, error: { code: 'network', message: 'Offline', retry_after: 5 } }; throw current.error; }
     });
     render(<GitHubUsage/>); await flush();
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' })); await flush();
