@@ -39,6 +39,14 @@ The helper writes the dedicated codex-hooks.sqlite3 directly using SQLite WAL an
 
 The store defaults to disabled, retains at most 200 sessions and 20,000 dedup IDs for seven days, and keeps only bounded pending-wait/run metadata. Duplicate event IDs and older timestamps cannot regress state; callbacks from retired turns cannot end a newer turn. Equal-timestamp terminal ambiguity becomes Unknown. Startup invalidates retained running/waiting state until fresh evidence arrives. Silence is never interpreted as completion. Separate deletion leaves the enabled setting intact.
 
+### Source Conversation Deletion
+
+Lifecycle hooks do not emit a reliable permanent-deletion event. Every five seconds Luma reconciles only its tracked UUID session IDs against the known local state_5.sqlite threads index, read-only with WAL visibility. Archived rows are retained. If an ID is absent, active and archived rollout filenames are checked without opening their contents. Unsupported/newer index layouts, missing directories, read errors, symbolic links, or bounded scan limits abort that pass and never remove a card.
+
+A session absent from both sources must be inactive for at least 30 seconds and missing on two successful scans at least five seconds apart before its card is hidden. The bounded local record is retained reversibly because a never-indexed/ephemeral session cannot be proven permanently deleted by absence alone. If source evidence reappears, the card returns as Unknown pending fresh hooks. Hidden markers prevent late terminal/tool hooks resurrecting cards; a fresh UserPromptSubmit after hiding restores the card and restarts the grace period, including ephemeral sessions; Clear saved sessions removes them, and seven-day retention remains in force. Applying a missing result checks the unchanged session projection atomically against concurrent hook updates.
+
+This also reconciles orphan records created by older Luma builds. Typical removal is within 5–10 seconds for an already-idle session, or after the initial 30-second grace for recent activity. No Codex data is modified, and index fields are not used to infer runtime status.
+
 ### Validation Boundary
 
 Rust tests cover normalization, configuration merge/install/remove and malformed-file preservation, decimal-free metadata persistence, state ordering/dedup, parallel waits, restart, retention, and concurrent SQLite reads. UI tests cover status ordering/privacy and explicit setup/removal/deletion. A native executable smoke test injects synthetic stdin events into a temporary database and verifies running → waiting → running → stopped plus cancellation, disabled collection, malformed input, and no prompt/body retention.

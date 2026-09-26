@@ -138,6 +138,7 @@ pub struct CodexService {
     config_path: PathBuf,
     install_lock: Mutex<()>,
     snapshot_lock: Mutex<()>,
+    reconciliation: Mutex<crate::codex_reconcile::Reconciler>,
 }
 #[derive(Serialize, Deserialize)]
 struct Manifest {
@@ -169,6 +170,7 @@ impl CodexService {
             config_path: codex_home.join("hooks.json"),
             install_lock: Mutex::new(()),
             snapshot_lock: Mutex::new(()),
+            reconciliation: Mutex::new(crate::codex_reconcile::Reconciler::default()),
         })
     }
     fn config(&self) -> Result<Value, String> {
@@ -209,6 +211,27 @@ impl CodexService {
                     })
                 })
         }))
+    }
+    pub fn reconcile_deleted(&self) {
+        let Some(home) = self.config_path.parent() else {
+            return;
+        };
+        let time = now();
+        let Ok(sessions) = self.store.reconciliation_snapshot(time) else {
+            return;
+        };
+        if sessions.is_empty() {
+            return;
+        }
+        let Ok(mut reconciliation) = self.reconciliation.lock() else {
+            return;
+        };
+        if let Some((missing, present)) = reconciliation.check(home, &sessions, time) {
+            let _ = self.store.restore_present(&present);
+            if !missing.is_empty() {
+                let _ = self.store.hide_missing(&missing, time);
+            }
+        }
     }
     pub fn prune(&self) {
         let _ = self.store.prune_expired(now());
@@ -499,6 +522,7 @@ mod tests {
             config_path: root.join("hooks.json"),
             install_lock: Mutex::new(()),
             snapshot_lock: Mutex::new(()),
+            reconciliation: Mutex::new(crate::codex_reconcile::Reconciler::default()),
         };
         let original = json!({"description":"User preferences","hooks":{"Stop":[{"hooks":[{"type":"command","command":"user-handler"}]}]}});
         atomic_json(&service.config_path, &original).unwrap();
@@ -538,6 +562,7 @@ mod tests {
             config_path: root.join("hooks.json"),
             install_lock: Mutex::new(()),
             snapshot_lock: Mutex::new(()),
+            reconciliation: Mutex::new(crate::codex_reconcile::Reconciler::default()),
         };
         fs::write(&service.config_path, b"user's invalid json").unwrap();
         assert!(service.enable().is_err());

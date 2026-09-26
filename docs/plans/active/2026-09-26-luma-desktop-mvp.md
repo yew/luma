@@ -58,6 +58,8 @@ This is the authorized implementation route; full AC1/AC6 acceptance still requi
 
 - Codex Hooks now has a native headless receiver, explicit install/disable/clear controls, metadata-only SQLite projection, and session cards/collapsed counts. Synthetic executable delivery and deterministic ordering/privacy/setup tests validate implementation. Hook trust and actual desktop/Windows event delivery remain unverified; stopped/requested states retain confidence limits rather than falsely claiming full AC1/AC6 completion.
 
+- Permanent-deletion repair adds bounded read-only reconciliation of tracked Codex IDs against the supported local index and rollout filenames. Confirmed missing cards hide after grace/two checks; archives and unreadable sources are preserved, late hooks are suppressed, and reappearing sources restore reversibly. No transcript content is read or Codex data modified.
+
 ### Delivery Estimates
 
 These are rough estimates for one developer familiar with the stack, subject to integration validation. Signing credential applications and external review time are additional.

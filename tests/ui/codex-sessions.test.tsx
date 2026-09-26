@@ -16,6 +16,13 @@ beforeEach(() => { bridge.invoke.mockReset(); bridge.native = true; });
 afterEach(cleanup);
 
 describe('Codex session metadata', () => {
+  it('removes a card when source reconciliation removes it from the snapshot', () => {
+    const status = { enabled:true, installed:true, error:null, sessions:[{ session_id:'deleted',turn_id:'turn',title:'Deleted conversation',project:null,status:'stopped' as const,detail:'Turn stopped',last_activity:1000 }] };
+    const view=render(<CodexSessions status={status} hideTitles={false} hidePaths={false} now={2000}/>);
+    expect(screen.getByText('Deleted conversation')).toBeTruthy();
+    view.rerender(<CodexSessions status={{...status,sessions:[]}} hideTitles={false} hidePaths={false} now={3000}/>);
+    expect(screen.queryByText('Deleted conversation')).toBeNull();
+  });
   it('orders waiting, running, stopped/canceled, unknown, then most recent without mutating source', () => {
     const sessions = [session('unknown', 'unknown', now), session('old-running', 'running', now - 120000), session('stopped', 'stopped'), session('waiting', 'waiting'), session('new-running', 'running'), session('canceled', 'canceled', now)];
     render(<CodexSessions status={status({ enabled: true, installed: true, sessions })} hideTitles={false} hidePaths={false} now={now}/>);

@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod codex;
+mod codex_reconcile;
 mod codex_state;
 mod github;
 mod history;
@@ -95,12 +96,19 @@ fn main() {
                 use tauri::Emitter;
                 let mut last = None;
                 let mut cleanup = std::time::Instant::now();
+                let mut reconciled = std::time::Instant::now();
                 let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
                 loop {
                     tick.tick().await;
                     if cleanup.elapsed() > std::time::Duration::from_secs(3600) {
                         codex_handle.state::<codex::CodexService>().prune();
                         cleanup = std::time::Instant::now();
+                    }
+                    if reconciled.elapsed() >= std::time::Duration::from_secs(5) {
+                        codex_handle
+                            .state::<codex::CodexService>()
+                            .reconcile_deleted();
+                        reconciled = std::time::Instant::now();
                     }
                     let status = codex_handle.state::<codex::CodexService>().status();
                     if last.as_ref().is_none_or(|previous: &codex::CodexStatus| {

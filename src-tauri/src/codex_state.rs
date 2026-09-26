@@ -108,13 +108,13 @@ impl CodexStore {
     fn initialize(mut connection: Connection) -> Result<Self, CodexError> {
         connection.pragma_update(None, "secure_delete", "ON")?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 1 {
+        if version > 2 {
             return Err(CodexError {
                 code: "codex_schema_newer",
                 message: "Codex monitoring storage needs a newer Luma version.",
             });
         }
-        if version == 1 {
+        if version == 2 {
             return Ok(Self {
                 connection: Mutex::new(connection),
             });
@@ -134,7 +134,10 @@ impl CodexStore {
                 session_id TEXT PRIMARY KEY, last_activity INTEGER NOT NULL, record TEXT NOT NULL
              );
              CREATE INDEX IF NOT EXISTS codex_sessions_time ON codex_sessions(last_activity);
-             PRAGMA user_version=1;",
+             CREATE TABLE IF NOT EXISTS codex_deleted (
+                session_id TEXT PRIMARY KEY, deleted_at INTEGER NOT NULL
+             );
+             PRAGMA user_version=2;",
         )?;
         transaction.commit()?;
         Ok(Self {
@@ -192,6 +195,24 @@ impl CodexStore {
             return Ok(false);
         }
         prune(&transaction, event.received_at)?;
+        let hidden_at: Option<u64> = transaction
+            .query_row(
+                "SELECT deleted_at FROM codex_deleted WHERE session_id=?1",
+                [&event.session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(hidden_at) = hidden_at {
+            // A genuinely new prompt boundary is live evidence even for ephemeral
+            // sessions. Older processes and terminal/tool callbacks stay suppressed.
+            if event.kind != "UserPromptSubmit" || event.received_at <= hidden_at {
+                return Ok(false);
+            }
+            transaction.execute(
+                "DELETE FROM codex_deleted WHERE session_id=?1",
+                [&event.session_id],
+            )?;
+        }
         if transaction.execute(
             "INSERT OR IGNORE INTO codex_events(event_id, received_at) VALUES(?1, ?2)",
             params![event.event_id, event.received_at],
@@ -224,14 +245,24 @@ impl CodexStore {
     /// A read-only view for frequent GUI polling. Expired rows are filtered
     /// here; physical cleanup happens on append, startup, and prune_expired.
     pub fn snapshot(&self, now_ms: u64) -> Result<Vec<Session>, CodexError> {
+        self.read_sessions(now_ms, false)
+    }
+    pub fn reconciliation_snapshot(&self, now_ms: u64) -> Result<Vec<Session>, CodexError> {
+        self.read_sessions(now_ms, true)
+    }
+    fn read_sessions(&self, now_ms: u64, include_hidden: bool) -> Result<Vec<Session>, CodexError> {
         valid_time(now_ms)?;
         let connection = self.lock()?;
         let mut statement = connection.prepare(
-            "SELECT record FROM codex_sessions WHERE last_activity >= ?1
+            "SELECT record FROM codex_sessions WHERE last_activity >= ?1 AND (?3 OR NOT EXISTS(SELECT 1 FROM codex_deleted d WHERE d.session_id=codex_sessions.session_id))
              ORDER BY last_activity DESC, session_id LIMIT ?2",
         )?;
         let jsons = statement.query_map(
-            params![now_ms.saturating_sub(RETENTION_MS), MAX_SESSIONS],
+            params![
+                now_ms.saturating_sub(RETENTION_MS),
+                MAX_SESSIONS,
+                include_hidden
+            ],
             |row| row.get::<_, String>(0),
         )?;
         let mut sessions = Vec::new();
@@ -257,11 +288,86 @@ impl CodexStore {
         transaction.commit()?;
         Ok(())
     }
+    /// Absence cannot prove deletion for never-indexed threads. Hide reversibly;
+    /// preserve the bounded record so later indexing can restore it safely.
+    pub fn hide_missing(&self, candidates: &[Session], now_ms: u64) -> Result<usize, CodexError> {
+        valid_time(now_ms)?;
+        let mut connection = self.lock()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut count = 0;
+        for expected in candidates {
+            if !valid_text(&expected.session_id, 128) {
+                return Err(CodexError::invalid());
+            }
+            let json: Option<String> = tx
+                .query_row(
+                    "SELECT record FROM codex_sessions WHERE session_id=?1",
+                    [&expected.session_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(json) = json else {
+                continue;
+            };
+            let current: Record =
+                serde_json::from_str(&json).map_err(|_| CodexError::database())?;
+            if current.session != *expected {
+                continue;
+            }
+            count += tx.execute(
+                "INSERT OR IGNORE INTO codex_deleted(session_id,deleted_at) VALUES(?1,?2)",
+                params![expected.session_id, now_ms],
+            )?;
+        }
+        prune(&tx, now_ms)?;
+        tx.commit()?;
+        Ok(count)
+    }
+    pub fn restore_present(
+        &self,
+        ids: &std::collections::HashSet<String>,
+    ) -> Result<(), CodexError> {
+        let mut connection = self.lock()?;
+        let hidden: Vec<String> = connection
+            .prepare("SELECT session_id FROM codex_deleted")?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        if !hidden.iter().any(|id| ids.contains(id)) {
+            return Ok(());
+        }
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for id in ids {
+            if tx.execute("DELETE FROM codex_deleted WHERE session_id=?1", [id])? > 0 {
+                let json: Option<String> = tx
+                    .query_row(
+                        "SELECT record FROM codex_sessions WHERE session_id=?1",
+                        [id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if let Some(json) = json {
+                    let mut record: Record =
+                        serde_json::from_str(&json).map_err(|_| CodexError::database())?;
+                    clear_waits(&mut record);
+                    set_state(
+                        &mut record,
+                        "unknown",
+                        "Source session found again; waiting for fresh runtime evidence.",
+                    );
+                    save(&tx, &record)?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
     /// Clear session metadata and dedup keys without changing the opt-in.
     pub fn clear(&self) -> Result<(), CodexError> {
         let mut connection = self.lock()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute_batch("DELETE FROM codex_sessions; DELETE FROM codex_events;")?;
+        transaction.execute_batch(
+            "DELETE FROM codex_sessions; DELETE FROM codex_events; DELETE FROM codex_deleted;",
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -539,6 +645,8 @@ fn invalidate_active(transaction: &Transaction<'_>, detail: &str) -> Result<(), 
 }
 fn prune(transaction: &Transaction<'_>, now_ms: u64) -> Result<(), CodexError> {
     let cutoff = now_ms.saturating_sub(RETENTION_MS);
+    transaction.execute("DELETE FROM codex_deleted WHERE deleted_at < ?1", [cutoff])?;
+    transaction.execute("DELETE FROM codex_deleted WHERE session_id IN (SELECT session_id FROM codex_deleted ORDER BY deleted_at DESC LIMIT -1 OFFSET 2000)", [])?;
     transaction.execute("DELETE FROM codex_events WHERE received_at < ?1", [cutoff])?;
     transaction.execute(
         "DELETE FROM codex_sessions WHERE last_activity < ?1",
@@ -584,6 +692,71 @@ mod tests {
         store.snapshot(1000).unwrap().remove(0)
     }
 
+    #[test]
+    fn deleted_sessions_stay_removed_after_restart_and_late_hooks() {
+        let store = store();
+        store.append(event("UserPromptSubmit", 20)).unwrap();
+        assert_eq!(
+            store
+                .hide_missing(&store.snapshot(20).unwrap(), 30)
+                .unwrap(),
+            1
+        );
+        assert!(store.snapshot(30).unwrap().is_empty());
+        store.mark_restarted(40).unwrap();
+        assert!(!store.append(event("Stop", 50)).unwrap());
+        assert!(!store.append(event("UserPromptSubmit", 25)).unwrap());
+        assert!(store.snapshot(60).unwrap().is_empty());
+        assert!(store.append(event("UserPromptSubmit", 70)).unwrap());
+        assert_eq!(store.snapshot(70).unwrap()[0].status, "running");
+        assert!(store.enabled().unwrap());
+    }
+    #[test]
+    fn reconciliation_does_not_delete_a_session_updated_after_its_snapshot() {
+        let store = store();
+        store.append(event("UserPromptSubmit", 20)).unwrap();
+        let prior = store.snapshot(20).unwrap().remove(0);
+        store.append(event("PreToolUse", 40)).unwrap();
+        assert_eq!(store.hide_missing(&[prior], 50).unwrap(), 0);
+        assert_eq!(store.snapshot(50).unwrap().len(), 1);
+        assert!(store.append(event("Stop", 60)).unwrap());
+    }
+    #[test]
+    fn later_indexing_restores_hidden_metadata_and_clear_removes_markers() {
+        let store = store();
+        store.append(event("UserPromptSubmit", 20)).unwrap();
+        store
+            .hide_missing(&store.snapshot(20).unwrap(), 40)
+            .unwrap();
+        assert_eq!(store.reconciliation_snapshot(50).unwrap().len(), 1);
+        store
+            .restore_present(&std::collections::HashSet::from(["session-1".into()]))
+            .unwrap();
+        assert_eq!(store.snapshot(50).unwrap()[0].status, "unknown");
+        assert!(store.append(event("PreToolUse", 60)).unwrap());
+        store
+            .hide_missing(&store.snapshot(60).unwrap(), 80)
+            .unwrap();
+        store.clear().unwrap();
+        assert!(store.append(event("UserPromptSubmit", 100)).unwrap());
+    }
+    #[test]
+    fn version_one_store_migrates_and_preserves_sessions() {
+        let store = store();
+        store.append(event("Stop", 20)).unwrap();
+        let connection = store.connection.into_inner().unwrap();
+        connection
+            .execute_batch("DROP TABLE codex_deleted; PRAGMA user_version=1;")
+            .unwrap();
+        let reopened = CodexStore::initialize(connection).unwrap();
+        assert_eq!(reopened.snapshot(30).unwrap().len(), 1);
+        assert_eq!(
+            reopened
+                .hide_missing(&reopened.snapshot(30).unwrap(), 40)
+                .unwrap(),
+            1
+        );
+    }
     #[test]
     fn opt_in_and_restart_do_not_fabricate_runtime_activity() {
         let store = CodexStore::initialize(Connection::open_in_memory().unwrap()).unwrap();
