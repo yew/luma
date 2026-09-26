@@ -40,6 +40,7 @@ fn main() {
             github::github_refresh,
             preferences::get_preferences,
             preferences::update_preferences,
+            preferences::set_compact_view,
             history::history_settings,
             history::update_history_settings,
             history::query_usage_history,

@@ -4,6 +4,7 @@ import { Settings, defaultPreferences, type Preferences } from './Settings';
 import { HistorySettings } from './HistorySettings';
 import { listen } from '@tauri-apps/api/event';
 import { isTauri, invoke } from '@tauri-apps/api/core';
+import { usageState } from './lib/usage-state.mjs';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
 const samples = [
@@ -15,11 +16,16 @@ const samples = [
 export function App() {
   const [demo, setDemo] = useState(false);
   const [preferences, setPreferences] = useState<Preferences>(defaultPreferences);
+  const [clock, setClock] = useState(Date.now());
+  useEffect(() => { const timer = setInterval(() => setClock(Date.now()), 15000); return () => clearInterval(timer); }, []);
   const [auth, setAuth] = useState<Auth | null>(null);
   const { collapsed, pinned, hide_titles: hideTitles, hide_paths: hidePaths } = preferences;
   const [settings, setSettings] = useState(false);
 
   const [message, setMessage] = useState('');
+  useEffect(() => {
+    if (isTauri()) void invoke('set_compact_view', { compact: collapsed && !settings }).catch(() => setMessage('Unable to resize the dashboard.'));
+  }, [collapsed, settings]);
   useEffect(() => {
     if (!isTauri()) return;
     void invoke<Preferences>('get_preferences').then(setPreferences).catch(() => setMessage('Unable to load saved preferences.'));
@@ -45,13 +51,14 @@ export function App() {
     {message && <p className="notice" role="status">{message}</p>}
     {settings && <><Settings preferences={preferences} onPreferencesChange={updatePreferences} demo={demo} onDemoChange={setDemo}/><HistorySettings account={auth?.account ?? null}/></>}
     {demo && <p className="demo-note">Demo data · not live usage or session activity</p>}
+    {collapsed && !demo && auth && <p className="collapsed-freshness" role="status">GitHub · {usageState(auth, { now: clock, refreshIntervalSeconds: preferences.refresh_interval_secs }).label}</p>}
     {collapsed ? <section className="summary" aria-label="Activity summary">
       <span><b>{demo ? '1' : '—'}</b> waiting</span><span><b>{demo ? '1' : '—'}</b> running</span><span><b>{demo ? '36.1%' : auth?.snapshot?.used_percent != null ? auth.snapshot.used_percent.toFixed(1) + '%' : '—'}</b> used</span>
     </section> : null}
     <div hidden={collapsed}>
       <section aria-labelledby="usage-title">
         <div className="section-heading"><h2 id="usage-title">AI USAGE</h2><span>{demo ? '1 provider' : 'GitHub'}</span></div>
-        <div hidden={demo}><GitHubUsage onStatus={setAuth} /></div>
+        <div hidden={demo}><GitHubUsage onStatus={setAuth} refreshIntervalSeconds={preferences.refresh_interval_secs} /></div>
         {demo && <article className="usage-card">
           <div className="provider-row"><div className="provider-icon">⌘</div><div><h3>GitHub Copilot</h3><span className="muted">{demo ? 'Enterprise · premium quota' : 'Premium quota'}</span></div><span className="chip">{demo ? 'Demo' : 'Offline'}</span></div>
           {demo ? <>

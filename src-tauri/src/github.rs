@@ -1,6 +1,6 @@
 //! Native GitHub device flow. Secrets never implement Serialize or Debug.
 use crate::storage::{AccountKey, ObservationInput, Storage};
-use reqwest::{Client, Response};
+use reqwest::{header::HeaderMap, Client, Response};
 use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -68,6 +68,8 @@ pub struct CopilotSnapshot {
 #[derive(Clone, Serialize)]
 pub struct AuthStatus {
     pub revision: u64,
+    /// Earliest permitted manual refresh, including provider cooldown/backoff.
+    pub next_refresh_at: Option<u64>,
     pub state: String,
     pub account: Option<Account>,
     pub snapshot: Option<CopilotSnapshot>,
@@ -165,6 +167,7 @@ struct Inner {
     generation: u64,
     next_refresh: Option<Instant>,
     failures: u32,
+    last_successful_poll: Option<Instant>,
 }
 impl Inner {
     fn status(&self) -> AuthStatus {
@@ -183,6 +186,9 @@ impl Inner {
         };
         AuthStatus {
             revision: STATUS_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1,
+            next_refresh_at: self
+                .next_refresh
+                .map(|deadline| deadline_epoch_millis(deadline, Instant::now(), epoch_millis())),
             state: state.into(),
             account: self.account.clone(),
             snapshot: self.snapshot.clone(),
@@ -250,6 +256,7 @@ impl GitHubService {
                 generation: 0,
                 next_refresh: None,
                 failures: 0,
+                last_successful_poll: None,
             }),
         })
     }
@@ -348,13 +355,11 @@ impl GitHubService {
                     .as_ref()
                     .is_some_and(|e| e.code == "reauth_required")
                 && inner.next_refresh.is_none_or(|next| next <= Instant::now())
-                && (inner
-                    .error
-                    .as_ref()
-                    .is_some_and(|e| e.code != "history_storage")
-                    || inner.snapshot.as_ref().is_none_or(|s| {
-                        epoch_millis().saturating_sub(s.fetched_at) >= interval * 1000
-                    }))
+                && (inner.error.as_ref().is_some_and(|e| {
+                    !matches!(e.code.as_str(), "history_storage" | "cached_response")
+                }) || inner
+                    .last_successful_poll
+                    .is_none_or(|last| last.elapsed() >= Duration::from_secs(interval)))
         };
         if should_refresh {
             let _ = self.refresh().await;
@@ -390,7 +395,14 @@ impl GitHubService {
         let count = self.storage.clear_cache(account)?;
         if current {
             inner.snapshot = None;
-            inner.next_refresh = Some(Instant::now() + Duration::from_secs(30));
+            inner.last_successful_poll = None;
+            // Clearing local cache cannot bypass the provider's existing wait.
+            inner.next_refresh = Some(
+                inner
+                    .next_refresh
+                    .unwrap_or_else(Instant::now)
+                    .max(deadline_after(30)),
+            );
         }
         Ok((count, inner.status()))
     }
@@ -410,15 +422,31 @@ impl GitHubService {
         request: reqwest::RequestBuilder,
         cancel: &mut watch::Receiver<u64>,
     ) -> Result<serde_json::Value, GitHubError> {
+        self.request_reply(request, cancel, false)
+            .await?
+            .body
+            .ok_or_else(GitHubError::schema)
+    }
+    async fn request_reply(
+        &self,
+        request: reqwest::RequestBuilder,
+        cancel: &mut watch::Receiver<u64>,
+        allow_not_modified: bool,
+    ) -> Result<UsageReply, GitHubError> {
         tokio::select! {
             biased;
             _ = cancel.changed() => Err(GitHubError::cancelled()),
             result = async {
                 let response = request.header("Accept", "application/json").send().await
                     .map_err(|_| GitHubError::new("network", "Cannot reach GitHub. Check the connection and retry."))?;
+                let cache = cache_policy(response.headers(), SystemTime::now());
+                if response.status() == reqwest::StatusCode::NOT_MODIFIED && allow_not_modified {
+                    return Ok(UsageReply { body: None, cache });
+                }
                 if !response.status().is_success() { return Err(http_error(&response)); }
                 let bytes = bounded_body(response).await?;
-                serde_json::from_slice(&bytes).map_err(|_| GitHubError::schema())
+                let body = serde_json::from_slice(&bytes).map_err(|_| GitHubError::schema())?;
+                Ok(UsageReply { body: Some(body), cache })
             } => result,
         }
     }
@@ -426,7 +454,7 @@ impl GitHubService {
         &self,
         token: &str,
         cancel: &mut watch::Receiver<u64>,
-    ) -> Result<(Account, CopilotSnapshot), GitHubError> {
+    ) -> Result<ValidatedUsage, GitHubError> {
         let raw = self
             .request(
                 self.client()?
@@ -439,22 +467,16 @@ impl GitHubService {
         if account.id == 0 || account.login.is_empty() {
             return Err(GitHubError::schema());
         }
-        let raw = self
-            .request(
+        let reply = self
+            .request_reply(
                 self.client()?
                     .get("https://api.github.com/copilot_internal/user")
                     .bearer_auth(token),
                 cancel,
+                true,
             )
             .await?;
-        let snapshot = project_copilot(raw, &account, epoch_millis())?;
-        if snapshot.premium.credits_used.is_none() {
-            return Err(GitHubError::new(
-                "metric_unavailable",
-                "GitHub did not report premium usage. Last valid usage is retained.",
-            ));
-        }
-        Ok((account, snapshot))
+        validate_usage_reply(reply, account, epoch_millis())
     }
     async fn status(&self) -> AuthStatus {
         // Serialize concurrent startup status calls until credential validation has completed.
@@ -634,9 +656,8 @@ impl GitHubService {
                         let delay = error
                             .retry_after
                             .unwrap_or(device.interval)
-                            .max(device.interval)
-                            .min(3600);
-                        device.next_poll = Instant::now() + Duration::from_secs(delay);
+                            .max(device.interval);
+                        device.next_poll = deadline_after(delay);
                         error.retry_after = Some(delay);
                     }
                     inner.error = Some(error.clone());
@@ -668,12 +689,12 @@ impl GitHubService {
         let collection_id = uuid::Uuid::new_v4().to_string();
         let result = async {
             let mut token = parse_token(&raw)?;
-            let (account, snapshot) = self
+            let usage = self
                 .validate(&token.access_token, &mut cancel)
                 .await
                 .map_err(post_exchange_error)?;
-            token.account = Some(account.clone());
-            Ok::<_, GitHubError>((token, account, snapshot))
+            token.account = Some(usage.account.clone());
+            Ok::<_, GitHubError>((token, usage))
         }
         .await;
         let mut inner = self.inner.lock().await;
@@ -682,7 +703,7 @@ impl GitHubService {
         }
         inner.busy = false;
         inner.device = None;
-        let (token, account, snapshot) = match result {
+        let (token, usage) = match result {
             Ok(values) => values,
             Err(error) => {
                 inner.error = Some(error.clone());
@@ -700,13 +721,7 @@ impl GitHubService {
         }
         inner.token = Some(token);
         inner.loaded = true;
-        inner.error = self
-            .persist(&collection_id, started_at, &account, &snapshot)
-            .err();
-        inner.account = Some(account);
-        inner.snapshot = Some(snapshot);
-        inner.next_refresh = Some(Instant::now() + Duration::from_secs(30));
-        inner.failures = 0;
+        self.apply_usage(&mut inner, &collection_id, started_at, usage, None);
         Ok(PollResult {
             state: "connected".into(),
             retry_after: None,
@@ -768,7 +783,8 @@ impl GitHubService {
         }
         inner.busy = false;
         match result {
-            Ok((account, snapshot)) => {
+            Ok(usage) => {
+                let account = &usage.account;
                 if inner
                     .account
                     .as_ref()
@@ -804,18 +820,17 @@ impl GitHubService {
                 } else {
                     None
                 };
-                inner.error = self
-                    .persist(&collection_id, started_at, &account, &snapshot)
-                    .err()
-                    .or(credential_error);
                 if let Some(saved_token) = inner.token.as_mut() {
                     saved_token.account = Some(account.clone());
                 }
-                inner.account = Some(account);
-                inner.snapshot = Some(snapshot.clone());
-                inner.next_refresh = Some(Instant::now() + Duration::from_secs(30));
-                inner.failures = 0;
-                Ok(snapshot)
+                self.apply_usage(
+                    &mut inner,
+                    &collection_id,
+                    started_at,
+                    usage,
+                    credential_error,
+                )
+                .ok_or_else(cached_response_error)
             }
             Err(mut error) => {
                 if let Some(account) = &inner.account {
@@ -829,12 +844,48 @@ impl GitHubService {
                 }
                 inner.failures = inner.failures.saturating_add(1);
                 let delay = refresh_retry_delay(inner.failures, error.retry_after);
-                inner.next_refresh = Instant::now().checked_add(Duration::from_secs(delay));
+                inner.next_refresh = Some(deadline_after(delay));
                 error.retry_after = Some(delay);
                 inner.error = Some(error.clone());
                 Err(error)
             }
         }
+    }
+    fn apply_usage(
+        &self,
+        inner: &mut Inner,
+        collection_id: &str,
+        started_at: u64,
+        usage: ValidatedUsage,
+        credential_error: Option<GitHubError>,
+    ) -> Option<CopilotSnapshot> {
+        // Keep cache ownership safe for every caller, including cached-only account switches.
+        if inner
+            .account
+            .as_ref()
+            .is_none_or(|previous| previous.id != usage.account.id)
+            || inner
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.account_id != usage.account.id)
+        {
+            inner.snapshot = None;
+        }
+        let snapshot = usage.snapshot;
+        inner.error = if let Some(snapshot) = &snapshot {
+            let error = self
+                .persist(collection_id, started_at, &usage.account, snapshot)
+                .err();
+            inner.snapshot = Some(snapshot.clone());
+            error.or(credential_error)
+        } else {
+            Some(credential_error.unwrap_or_else(cached_response_error))
+        };
+        inner.account = Some(usage.account);
+        inner.next_refresh = Some(deadline_after(usage.cache_delay.max(30)));
+        inner.last_successful_poll = Some(Instant::now());
+        inner.failures = 0;
+        snapshot
     }
     async fn cancel(&self) {
         let mut inner = self.inner.lock().await;
@@ -854,6 +905,7 @@ impl GitHubService {
         inner.snapshot = None;
         inner.loaded = true;
         inner.next_refresh = None;
+        inner.last_successful_poll = None;
         inner.failures = 0;
         let deletion = credential().and_then(|entry| match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
@@ -871,6 +923,142 @@ impl GitHubService {
         }
     }
 }
+#[derive(Default)]
+struct CachePolicy {
+    delay: u64,
+    from_cache: bool,
+}
+struct UsageReply {
+    body: Option<serde_json::Value>,
+    cache: CachePolicy,
+}
+struct ValidatedUsage {
+    account: Account,
+    snapshot: Option<CopilotSnapshot>,
+    cache_delay: u64,
+}
+fn validate_usage_reply(
+    reply: UsageReply,
+    account: Account,
+    fetched_at: u64,
+) -> Result<ValidatedUsage, GitHubError> {
+    let snapshot = match reply.body {
+        Some(raw) => {
+            let snapshot = project_copilot(raw, &account, fetched_at)?;
+            if snapshot.premium.credits_used.is_none() {
+                return Err(GitHubError::new(
+                    "metric_unavailable",
+                    "GitHub did not report premium usage. Last valid usage is retained.",
+                ));
+            }
+            // A positive Age explicitly identifies a reused response, not a fresh poll.
+            (!reply.cache.from_cache).then_some(snapshot)
+        }
+        None => None, // A 304 cannot create a fresh observation or fetched_at.
+    };
+    Ok(ValidatedUsage {
+        account,
+        snapshot,
+        cache_delay: reply.cache.delay,
+    })
+}
+fn cached_response_error() -> GitHubError {
+    GitHubError::new(
+        "cached_response",
+        "GitHub returned cached usage. Last live observation is retained.",
+    )
+}
+fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+}
+fn decimal_seconds(value: &str) -> Option<u64> {
+    let value = value.trim();
+    (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| value.parse().ok())
+        .flatten()
+}
+fn system_seconds_until(deadline: SystemTime, now: SystemTime) -> u64 {
+    let duration = deadline.duration_since(now).unwrap_or_default();
+    duration
+        .as_secs()
+        .saturating_add(u64::from(duration.subsec_nanos() != 0))
+}
+fn retry_after_seconds(value: &str, now: SystemTime) -> Option<u64> {
+    decimal_seconds(value).or_else(|| {
+        httpdate::parse_http_date(value)
+            .ok()
+            .map(|deadline| system_seconds_until(deadline, now))
+    })
+}
+fn deadline_after(seconds: u64) -> Instant {
+    let now = Instant::now();
+    // Never convert an unrepresentable provider delay into an absent cooldown.
+    // One hundred years is a fail-closed bound beyond the useful token lifetime.
+    now.checked_add(Duration::from_secs(seconds))
+        .unwrap_or_else(|| now + Duration::from_secs(100 * 366 * 86_400))
+}
+fn deadline_epoch_millis(deadline: Instant, now: Instant, utc_now: u64) -> u64 {
+    let remaining = deadline.saturating_duration_since(now);
+    let millis = remaining.as_millis().saturating_add(u128::from(
+        !remaining.subsec_nanos().is_multiple_of(1_000_000),
+    ));
+    utc_now.saturating_add(millis.min(u64::MAX as u128) as u64)
+}
+fn cache_policy(headers: &HeaderMap, now: SystemTime) -> CachePolicy {
+    let age = header_text(headers, "age").and_then(decimal_seconds);
+    let mut policy = CachePolicy {
+        delay: 0,
+        from_cache: age.is_some_and(|age| age > 0),
+    };
+    let mut max_age = None;
+    let mut forbidden = false;
+    for value in headers.get_all("cache-control") {
+        let Ok(value) = value.to_str() else {
+            return policy;
+        };
+        for directive in value.split(',').map(str::trim) {
+            let (name, value) = directive
+                .split_once('=')
+                .map(|(name, value)| (name.trim(), Some(value.trim())))
+                .unwrap_or((directive, None));
+            if name.eq_ignore_ascii_case("no-cache") || name.eq_ignore_ascii_case("no-store") {
+                forbidden = true;
+            }
+            if name.eq_ignore_ascii_case("max-age") {
+                // Conflicting/duplicate freshness directives are not usable guidance.
+                if max_age.is_some() {
+                    return policy;
+                }
+                let Some(value) = value else {
+                    return policy;
+                };
+                let value = value
+                    .strip_prefix('"')
+                    .and_then(|value| value.strip_suffix('"'))
+                    .unwrap_or(value);
+                let Some(value) = decimal_seconds(value) else {
+                    return policy;
+                };
+                max_age = Some(value);
+            }
+        }
+    }
+    if !forbidden {
+        if let Some(max_age) = max_age {
+            // Date can reveal additional apparent age; never wait past known freshness.
+            let apparent_age = header_text(headers, "date")
+                .and_then(|value| httpdate::parse_http_date(value).ok())
+                .map(|date| now.duration_since(date).unwrap_or_default().as_secs())
+                .unwrap_or(0);
+            policy.delay = max_age.saturating_sub(age.unwrap_or(0).max(apparent_age));
+        }
+    }
+    policy
+}
+
 fn refresh_retry_delay(failures: u32, provider_delay: Option<u64>) -> u64 {
     let exponential = 300_u64.saturating_mul(1_u64 << failures.min(4)).min(3600);
     provider_delay.unwrap_or(0).max(exponential)
@@ -935,18 +1123,31 @@ fn classify_http(status: u16, remaining: Option<&str>, retry_after: Option<u64>)
     error
 }
 fn http_error(response: &Response) -> GitHubError {
-    classify_http(
+    http_error_headers(
         response.status().as_u16(),
-        response
-            .headers()
-            .get("x-ratelimit-remaining")
-            .and_then(|v| v.to_str().ok()),
-        response
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok()),
+        response.headers(),
+        SystemTime::now(),
     )
+}
+fn http_error_headers(status: u16, headers: &HeaderMap, now: SystemTime) -> GitHubError {
+    let retry_after =
+        header_text(headers, "retry-after").and_then(|value| retry_after_seconds(value, now));
+    let mut error = classify_http(
+        status,
+        header_text(headers, "x-ratelimit-remaining"),
+        retry_after,
+    );
+    if error.code == "rate_limited" {
+        let reset = header_text(headers, "x-ratelimit-reset")
+            .and_then(decimal_seconds)
+            .and_then(|seconds| UNIX_EPOCH.checked_add(Duration::from_secs(seconds)))
+            .map(|deadline| system_seconds_until(deadline, now));
+        error.retry_after = match (error.retry_after, reset) {
+            (Some(retry), Some(reset)) => Some(retry.max(reset)),
+            (retry, reset) => retry.or(reset),
+        };
+    }
+    error
 }
 // A successful exchange consumes the device code. Transient validation failures
 // cannot retry that exchange: the temporary token is discarded and sign-in must restart.
@@ -1324,6 +1525,262 @@ mod tests {
         assert_ne!(generation, service.inner.lock().await.generation);
         assert!(!service.inner.lock().await.busy);
     }
+    fn headers(values: &[(&'static str, &str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in values {
+            headers.append(*name, value.parse().unwrap());
+        }
+        headers
+    }
+    #[test]
+    fn provider_retry_dates_and_reset_limits_use_the_longest_wait() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_millis(500);
+        let future = httpdate::fmt_http_date(UNIX_EPOCH + Duration::from_secs(1_700_000_090));
+        assert_eq!(retry_after_seconds(" 120 ", now), Some(120));
+        assert_eq!(retry_after_seconds(&future, now), Some(90));
+        assert_eq!(
+            retry_after_seconds("Thu, 01 Jan 1970 00:00:00 GMT", now),
+            Some(0)
+        );
+        for value in ["-1", "1.5", "later", "18446744073709551616"] {
+            assert!(retry_after_seconds(value, now).is_none());
+        }
+        let error = http_error_headers(
+            403,
+            &headers(&[
+                ("retry-after", &future),
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", "1700000200"),
+            ]),
+            now,
+        );
+        assert_eq!(error.code, "rate_limited");
+        assert_eq!(error.retry_after, Some(200));
+        let denied = http_error_headers(403, &headers(&[("x-ratelimit-reset", "1700000200")]), now);
+        assert_eq!(denied.code, "permission_denied");
+        assert_eq!(denied.retry_after, None);
+        let unavailable = http_error_headers(503, &headers(&[("retry-after", &future)]), now);
+        assert_eq!(unavailable.retry_after, Some(90));
+    }
+    #[test]
+    fn cache_lifetime_subtracts_age_and_ignores_unusable_directives() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let recent = httpdate::fmt_http_date(now - Duration::from_secs(120));
+        let policy = cache_policy(
+            &headers(&[
+                ("cache-control", "private, max-age=600"),
+                ("age", "60"),
+                ("date", &recent),
+            ]),
+            now,
+        );
+        assert_eq!(policy.delay, 480);
+        assert!(policy.from_cache);
+        let fresh = cache_policy(
+            &headers(&[("cache-control", "MAX-AGE=\"600\""), ("age", "0")]),
+            now,
+        );
+        assert_eq!(fresh.delay, 600);
+        assert!(!fresh.from_cache);
+        for control in [
+            "max-age=600, no-store",
+            "max-age=600, no-cache",
+            "max-age=-1",
+            "max-age=600, max-age=900",
+            "max-age=oops",
+            "s-maxage=600",
+        ] {
+            assert_eq!(
+                cache_policy(&headers(&[("cache-control", control)]), now).delay,
+                0
+            );
+        }
+        assert_eq!(
+            cache_policy(
+                &headers(&[("cache-control", "max-age=60"), ("age", "120")]),
+                now
+            )
+            .delay,
+            0
+        );
+    }
+    #[test]
+    fn deadlines_round_up_and_never_drop_overflowed_cooldowns() {
+        let now = Instant::now();
+        assert_eq!(
+            deadline_epoch_millis(now + Duration::from_micros(1_501), now, 100),
+            102
+        );
+        assert_eq!(
+            deadline_epoch_millis(now - Duration::from_secs(1), now, 100),
+            100
+        );
+        assert!(deadline_after(u64::MAX) > now + Duration::from_secs(86_400));
+    }
+    #[tokio::test]
+    async fn cache_only_replies_preserve_original_observation_and_fresh_replies_extend_cooldown() {
+        let service = GitHubService::new(
+            Arc::new(Storage::in_memory().unwrap()),
+            &crate::network::ProxySettings::default(),
+        )
+        .unwrap();
+        let mut inner = service.inner.lock().await;
+        let fresh = validate_usage_reply(
+            UsageReply {
+                body: Some(fixture()),
+                cache: CachePolicy {
+                    delay: 600,
+                    from_cache: false,
+                },
+            },
+            account(),
+            100,
+        )
+        .unwrap();
+        service.apply_usage(&mut inner, "fresh", 90, fresh, None);
+        assert!(inner.next_refresh.unwrap() >= Instant::now() + Duration::from_secs(599));
+        let next_refresh = inner.status().next_refresh_at.unwrap();
+        assert!(next_refresh >= epoch_millis() + 599_000);
+        for (id, body) in [("aged", Some(fixture())), ("not-modified", None)] {
+            let cached = validate_usage_reply(
+                UsageReply {
+                    body,
+                    cache: CachePolicy {
+                        delay: 120,
+                        from_cache: true,
+                    },
+                },
+                account(),
+                200,
+            )
+            .unwrap();
+            assert!(service
+                .apply_usage(&mut inner, id, 190, cached, None)
+                .is_none());
+            assert_eq!(inner.snapshot.as_ref().unwrap().fetched_at, 100);
+            assert_eq!(inner.error.as_ref().unwrap().code, "cached_response");
+            assert_eq!(inner.failures, 0);
+        }
+        let query = crate::storage::HistoryQuery {
+            account: account_key(&account()),
+            metric: "premium_interactions".into(),
+            unit: "provider_quota_credit".into(),
+            semantics_version: "copilot-premium-v1".into(),
+            from: 0,
+            to: 1000,
+            limit: 10,
+            cursor: None,
+        };
+        assert_eq!(service.storage.query(query).unwrap().observations.len(), 1);
+        assert_eq!(
+            service
+                .storage
+                .latest(&account_key(&account()))
+                .unwrap()
+                .unwrap()["fetched_at"],
+            json!(100)
+        );
+    }
+    #[tokio::test]
+    async fn cached_account_switch_never_exposes_previous_accounts_snapshot() {
+        let service = GitHubService::new(
+            Arc::new(Storage::in_memory().unwrap()),
+            &crate::network::ProxySettings::default(),
+        )
+        .unwrap();
+        let mut inner = service.inner.lock().await;
+        let first_account = account();
+        let first = validate_usage_reply(
+            UsageReply {
+                body: Some(fixture()),
+                cache: CachePolicy::default(),
+            },
+            first_account.clone(),
+            100,
+        )
+        .unwrap();
+        service.apply_usage(&mut inner, "account-a", 90, first, None);
+        let second_account = Account {
+            id: first_account.id + 1,
+            login: "another-account".into(),
+        };
+        for (index, body) in [
+            None,
+            Some({
+                let mut body = fixture();
+                body["login"] = json!(second_account.login);
+                body
+            }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // Start each check with A's legitimate retained observation.
+            inner.account = Some(first_account.clone());
+            inner.snapshot = Some(project_copilot(fixture(), &first_account, 100).unwrap());
+            let cached = validate_usage_reply(
+                UsageReply {
+                    body,
+                    cache: CachePolicy {
+                        delay: 120,
+                        from_cache: true,
+                    },
+                },
+                second_account.clone(),
+                200,
+            )
+            .unwrap();
+            assert!(service
+                .apply_usage(&mut inner, &format!("account-b-{index}"), 190, cached, None)
+                .is_none());
+            assert_eq!(inner.account.as_ref().unwrap().id, second_account.id);
+            assert!(inner.snapshot.is_none());
+            assert!(service
+                .storage
+                .latest(&account_key(&second_account))
+                .unwrap()
+                .is_none());
+            assert_eq!(
+                service
+                    .storage
+                    .latest(&account_key(&first_account))
+                    .unwrap()
+                    .unwrap()["fetched_at"],
+                json!(100)
+            );
+        }
+        // The first sign-in can wait for fresh usage without fabricating an initial sample.
+        inner.account = None;
+        inner.snapshot = None;
+        service.apply_usage(
+            &mut inner,
+            "initial-cache",
+            290,
+            ValidatedUsage {
+                account: second_account,
+                snapshot: None,
+                cache_delay: 30,
+            },
+            None,
+        );
+        assert!(inner.snapshot.is_none());
+        assert_eq!(inner.error.as_ref().unwrap().code, "cached_response");
+    }
+
+    #[tokio::test]
+    async fn clearing_cache_cannot_shorten_provider_backoff() {
+        let service = GitHubService::new(
+            Arc::new(Storage::in_memory().unwrap()),
+            &crate::network::ProxySettings::default(),
+        )
+        .unwrap();
+        let deadline = deadline_after(7200);
+        service.inner.lock().await.next_refresh = Some(deadline);
+        let (_, status) = service.clear_cache_inner(None).await.unwrap();
+        assert_eq!(service.inner.lock().await.next_refresh, Some(deadline));
+        assert!(status.next_refresh_at.unwrap() >= epoch_millis() + 7_199_000);
+    }
+
     #[test]
     fn short_provider_hints_cannot_shorten_failure_backoff() {
         for (failures, expected) in [(1, 600), (2, 1200), (3, 2400), (4, 3600), (100, 3600)] {

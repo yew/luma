@@ -20,6 +20,10 @@ No tested minimum OS version is established. Windows ARM64 and universal macOS p
 - Installed `codex-cli 0.155.0-alpha.16.4` provides candidate start/end metadata. A supported observer transport and the required live waiting/resume sequence remain unresolved. See [Codex findings](integrations/codex.md).
 - Current validation on 2026-09-26: frontend type checking and bundling, six Node diagnostic/state-order tests, 35 Rust tests, strict clippy, and plan lint pass. Rust coverage includes OAuth/metric parsing, Copilot-to-storage precision, six preference tests, and thirteen history tests. Workflow actionlint and YAML validation pass. This is local automated evidence; CI execution and native interaction checks remain pending.
 
+## Current Implementation Checks
+
+The continued implementation passes frontend bundling, eight Node state/diagnostic tests, 47 Rust tests, and strict clippy. Native tests cover HTTP cache-only responses, provider retry dates/reset limits, immutable history, proxy routing, and compact-window geometry. Device interaction remains separate from these deterministic checks. The short resource baseline below measures the earlier packaged commit, not the new UI timers.
+
 ## Manual Test Record
 
 Create one record per actual device/package under the local harness runtime root. Include test date, commit, OS/build, CPU model/architecture, memory, display scale, monitor arrangement, package filename, credential-store availability, and the exact tests run. Use pass/fail/blocked with a reason; keep unchecked checks incomplete. Do not record secrets or conversation content.
@@ -76,6 +80,31 @@ Performance acceptance remains unmet until measurements are recorded on document
 3. Record median/95th-percentile CPU, total CPU time, and steady memory. AC9 requires steady idle CPU below 1% of one core. Record any short refresh spikes separately.
 4. Once live observation is available, measure at least 30 source-event-to-render intervals with a monotonic clock and report median, 95th percentile, and maximum. The plan expects typical hook-driven updates within one second; do not substitute polling or demo timings.
 5. Run at least eight hours with ordinary refreshes and representative network loss, sleep/wake, and session activity. Compare memory after equivalent settling periods at start/end and inspect resource counts for unresolved growth. Archive sanitized measurements and a concise result with the measured memory budget.
+
+### Short macOS Baseline (2026-09-26)
+
+A bounded baseline measured release commit `468afacc8168eb6be5f6502cc283986a75050dae`, launched from the existing unsigned `Luma_0.1.0_aarch64.dmg` on a read-only mount. Its SHA-256 is `d9ed290e73a38e2ed168b107e66403a90cd5b39d0689c4717463fdf2ec6b1f7f`. The device was Mac17,3, Apple M5, 10 logical CPUs, 16 GiB RAM, arm64, macOS 26.6.2 (25G83), on AC power. Power mode and displays were not inspected.
+
+Sampling ran from 03:58:48.923 to 04:00:48.975 UTC for 120.05 seconds, with 116 observations at a nominal one-second interval (process inspection adds overhead). Only PID 30558 was in the selected process tree; no descendants appeared. macOS WebKit XPC processes had parent PID 1, so they were excluded because ownership could not be proven from this metadata. The results therefore measure the native parent process only, not total application resource use.
+
+| Native-parent measurement | Result |
+| --- | --- |
+| CPU consumed / average of one core | 0.05 CPU seconds / 0.042% |
+| One-second CPU median / 95th percentile / maximum | 0% / 0% / 0.955% |
+| RSS median / 95th percentile / maximum | 94.28 / 98.81 / 104.27 MiB |
+| RSS first / last observation | 104.27 / 87.89 MiB |
+
+CPU counters from `ps` are quantized, so zero interval percentiles do not mean zero CPU work. RSS is resident memory, not macOS physical footprint. A provisional native-parent steady RSS budget of 160 MiB gives approximately 1.5 times the observed short-run maximum, rounded upward, for the fuller checks. This is an engineering budget, not proof that the complete app meets a memory target: separately attribute WebKit GPU/network/content processes and establish the full-application budget before AC9 completion.
+
+This run had only approximately nine seconds of settling, used a DMG launch rather than an installed app, and did not inspect UI state, account/session counts, refresh configuration, or authentication state. No app interactions were generated; other workstation activity was uncontrolled. Consequently it is not a ten-minute idle pass, an eight-hour growth check, a live-event latency test, or a Windows result. The test-owned process was stopped and the read-only mount detached afterward.
+
+Sanitized samples and context are under `.local/harness/performance/baseline-2026-09-26.json` and `context-2026-09-26.json`. The reusable macOS sampler reads process IDs, parent IDs, CPU counters, RSS, and executable names only:
+
+```bash
+python3 tools/measure-idle.py --pid <luma-pid> --duration 600 --interval 1 --output .local/harness/performance/idle.json
+```
+
+It selects the requested process and observable descendants, explicitly excludes unattributed helpers, and does not infer UI state or read process arguments/content. Confirm the workload and helper attribution separately before interpreting an extended result.
 
 ## Distribution Gate
 

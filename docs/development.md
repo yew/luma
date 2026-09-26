@@ -109,3 +109,9 @@ Settings now persist in `preferences.sqlite3` in the application data directory.
 Usage history persists in usage.sqlite3 with immutable exact-decimal observations, bounded paginated queries, migrations, and independent latest projections. Collection defaults to enabled with 90-day retention; settings provide disablement and separate history/cache deletion. Backend tests cover these contracts; installed-app and Windows checks remain pending. See [the history contract](integrations/usage-history.md). Live Codex observation remains unresolved; see [Codex integration](integrations/codex.md).
 
 Disposable logs, screenshots, and measurements belong under the local runtime root returned by `harness repo config get paths.local_runtime`. Record only sanitized metadata. Never attach tokens, device codes, conversation bodies, or private project paths to a workflow artifact or validation report.
+
+## Compact Window and Recovery
+
+Collapse reduces the native dashboard to 240 logical pixels high. Moving the compact window updates position while retaining the expanded dimensions. Opening Settings expands temporarily; closing Settings restores the compact view. Expanding and tray recovery clamp geometry to connected monitor work areas using the destination monitor DPI. Privacy and collapsed preferences remain persisted independently.
+
+Usage status labels include freshness and error categories. Manual refresh shows a countdown from the backend's actual cooldown/provider deadline; switching accounts cannot inherit an earlier account's local retry fallback.

@@ -18,3 +18,4 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 rust_decimal = { version = "1", default-features = false, features = ["std"] }
 uuid = { version = "1", features = ["v4"] }
 tauri-plugin-autostart = "2"
+httpdate = "1"

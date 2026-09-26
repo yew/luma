@@ -2,7 +2,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
-    sync::{mpsc, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
     time::Duration,
 };
 use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize};
@@ -147,6 +150,7 @@ pub struct PreferencesState {
     store: Arc<Mutex<Store>>,
     updates: tokio::sync::Mutex<()>,
     geometry_changed: mpsc::Sender<()>,
+    compact_view: AtomicBool,
 }
 
 impl PreferencesState {
@@ -187,6 +191,7 @@ impl PreferencesState {
             store,
             updates: tokio::sync::Mutex::new(()),
             geometry_changed: sender,
+            compact_view: AtomicBool::new(false),
         })
     }
 
@@ -276,6 +281,79 @@ pub async fn update_preferences(
     }
     let _ = app.emit("preferences-changed", &next);
     Ok(next)
+}
+
+/// Change the visible layout without overwriting expanded window dimensions.
+/// The collapsed preference is persisted separately; Settings can temporarily expand.
+#[tauri::command]
+pub fn set_compact_view(app: tauri::AppHandle, compact: bool) -> Result<(), String> {
+    let state = app.state::<PreferencesState>();
+    let window = app
+        .get_webview_window("main")
+        .ok_or("Luma's window is unavailable.")?;
+    if state.compact_view.load(Ordering::Relaxed) == compact {
+        return Ok(());
+    }
+    let scale = window
+        .scale_factor()
+        .map_err(|_| "Unable to read window scale.")?;
+    let size = window
+        .inner_size()
+        .map_err(|_| "Unable to read window size.")?;
+    let position = window
+        .outer_position()
+        .map_err(|_| "Unable to read window position.")?;
+    let expanded = {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|_| "Unable to access local preferences.")?;
+        if compact {
+            store.saved.geometry = Some(WindowGeometry {
+                x: position.x,
+                y: position.y,
+                width: f64::from(size.width) / scale,
+                height: f64::from(size.height) / scale,
+            });
+            store.persist()?;
+        }
+        store.saved.geometry.unwrap_or(WindowGeometry {
+            x: position.x,
+            y: position.y,
+            width: 360.0,
+            height: 480.0,
+        })
+    };
+    state.compact_view.store(compact, Ordering::Relaxed);
+    let height = if compact { 240.0 } else { expanded.height };
+    if window
+        .set_size(tauri::LogicalSize::new(expanded.width, height))
+        .is_err()
+    {
+        state.compact_view.store(!compact, Ordering::Relaxed);
+        return Err("Unable to resize the dashboard.".into());
+    }
+    if !compact {
+        restore_window(&app)?;
+    }
+    Ok(())
+}
+
+fn saved_geometry_for_view(
+    current: WindowGeometry,
+    prior: Option<WindowGeometry>,
+    compact: bool,
+) -> WindowGeometry {
+    if compact {
+        if let Some(prior) = prior {
+            return WindowGeometry {
+                x: current.x,
+                y: current.y,
+                ..prior
+            };
+        }
+    }
+    current
 }
 
 #[derive(Clone, Copy)]
@@ -380,7 +458,15 @@ pub fn restore_window(app: &tauri::AppHandle) -> Result<(), String> {
             }
         })
         .collect();
-    if let Some(geometry) = recover_geometry(geometry, &areas) {
+    let target = if state.compact_view.load(Ordering::Relaxed) {
+        WindowGeometry {
+            height: 240.0,
+            ..geometry
+        }
+    } else {
+        geometry
+    };
+    if let Some(geometry) = recover_geometry(target, &areas) {
         window
             .set_size(PhysicalSize::new(geometry.width, geometry.height))
             .map_err(|_| "Unable to restore window size.")?;
@@ -416,12 +502,17 @@ pub fn persist_window_event(window: &tauri::Window, event: &tauri::WindowEvent) 
                 return;
             }
             if let Ok(mut store) = state.store.lock() {
-                store.saved.geometry = Some(WindowGeometry {
+                let current = WindowGeometry {
                     x: position.x,
                     y: position.y,
                     width: f64::from(size.width) / scale,
                     height: f64::from(size.height) / scale,
-                });
+                };
+                store.saved.geometry = Some(saved_geometry_for_view(
+                    current,
+                    store.saved.geometry,
+                    state.compact_view.load(Ordering::Relaxed),
+                ));
             }
             let _ = state.geometry_changed.send(());
         }
@@ -439,6 +530,70 @@ pub fn persist_window_event(window: &tauri::Window, event: &tauri::WindowEvent) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moving_compact_view_preserves_expanded_dimensions() {
+        let expanded = WindowGeometry {
+            x: 10,
+            y: 20,
+            width: 500.0,
+            height: 720.0,
+        };
+        let compact = WindowGeometry {
+            x: 200,
+            y: 100,
+            width: 500.0,
+            height: 240.0,
+        };
+        let saved = saved_geometry_for_view(compact, Some(expanded), true);
+        assert_eq!(saved.width, 500.0);
+        assert_eq!(saved.height, 720.0);
+        assert_eq!((saved.x, saved.y), (200, 100));
+        assert_eq!(
+            saved_geometry_for_view(compact, Some(expanded), false),
+            compact
+        );
+    }
+
+    #[test]
+    fn compact_recovery_uses_destination_dpi_and_expansion_fits_work_area() {
+        let destination = WorkArea {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 800,
+            scale: 1.0,
+        };
+        let compact = WindowGeometry {
+            x: 900,
+            y: 500,
+            width: 360.0,
+            height: 240.0,
+        };
+        let recovered = recover_geometry(compact, &[destination]).unwrap();
+        assert_eq!(recovered.height, 240);
+        assert_eq!(recovered.y, 500);
+        let expanded = recover_geometry(
+            WindowGeometry {
+                height: 720.0,
+                ..compact
+            },
+            &[destination],
+        )
+        .unwrap();
+        assert!(expanded.y + expanded.height as i32 <= 800);
+        let retina = recover_geometry(
+            compact,
+            &[WorkArea {
+                width: 2560,
+                height: 1600,
+                scale: 2.0,
+                ..destination
+            }],
+        )
+        .unwrap();
+        assert_eq!(retina.height, 480);
+    }
 
     #[test]
     fn proxy_defaults_migrate_and_updates_persist_without_clobbering_other_settings() {
