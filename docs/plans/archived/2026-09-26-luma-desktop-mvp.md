@@ -347,8 +347,10 @@ Resume with the remaining installed-app OAuth and real Codex hook checks above. 
 
 ## Closeout
 
-- Validation: PENDING_UNTIL_ARCHIVE
-- Review: PENDING_UNTIL_ARCHIVE
-- Delivered: PENDING_UNTIL_ARCHIVE
-- Not Delivered: PENDING_UNTIL_ARCHIVE
-- Follow-Up Issues: NONE
+- Archived At: 2026-09-26T23:38:34+08:00
+- Revision: 1
+- Validation: 84 Rust tests, 27 component tests, eight Node tests, frontend build, strict clippy and plan lint passed. macOS installed-app checks and user-observed real Hooks/OAuth/cache-clear/restart checks passed; usual sub-second updates were user-confirmed. Rebuilt unsigned DMG integrity passed; SHA-256 7efb43aeba40b0c297686d65284cae805979bf88a6b4da47db7fff1a2dd28d9f. Historical macOS ARM64/Intel CI run36233920053 passed; current PR CI is tracked separately.
+- Review: Independent full round review-001-full and linked repair review-002-delta cover candidate b25f112; final delta passed. Blocking repairs invalidate active states on missing Hooks and retain explicit per-account history deletion after disconnect. Minor historical documentation wording remains non-blocking.
+- Delivered: macOS local floating/tray dashboard, native Luma OAuth and Copilot usage, precise SQLite history and retention/deletion, configurable HTTP proxy, persistent window/privacy/login preferences, five-state Codex Hooks monitoring and source-deletion reconciliation, unsigned DMG and build workflow.
+- Not Delivered: Windows validation/delivery, reliable final-success/failure classification, additional integrations, analytics UI, updates, signing/notarization and public distribution. User-canceled backing-scale/clean-user/long-duration tests were not performed or counted as passed.
+- Follow-Up Issues: https://github.com/yew/luma/issues/1
