@@ -167,6 +167,18 @@ impl CodexStore {
         transaction.commit()?;
         Ok(())
     }
+    /// Losing the source invalidates active evidence without changing opt-in or
+    /// activity timestamps. Repeated checks do not rewrite unknown/terminal rows.
+    pub fn invalidate_source(&self) -> Result<(), CodexError> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        invalidate_active(
+            &transaction,
+            "Monitoring unavailable; waiting for a fresh runtime hook.",
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
     /// Called once by GUI setup, never by a headless writer. A restart does not
     /// advance last_activity because it is not new activity from the agent.
     pub fn mark_restarted(&self, now_ms: u64) -> Result<(), CodexError> {
@@ -692,6 +704,24 @@ mod tests {
         store.snapshot(1000).unwrap().remove(0)
     }
 
+    #[test]
+    fn source_invalidation_preserves_opt_in_and_does_not_rewrite_unknown_rows() {
+        let store = store();
+        store.append(event("PermissionRequest", 20)).unwrap();
+        store.invalidate_source().unwrap();
+        let unknown = only(&store);
+        assert_eq!(unknown.status, "unknown");
+        assert_eq!(unknown.last_activity, 20);
+        assert!(store.enabled().unwrap());
+        let writes = store.lock().unwrap().total_changes();
+        store.invalidate_source().unwrap();
+        assert_eq!(store.lock().unwrap().total_changes(), writes);
+        assert_eq!(only(&store), unknown);
+        store.append(event("Stop", 30)).unwrap();
+        let stopped = only(&store);
+        store.invalidate_source().unwrap();
+        assert_eq!(only(&store), stopped);
+    }
     #[test]
     fn deleted_sessions_stay_removed_after_restart_and_late_hooks() {
         let store = store();

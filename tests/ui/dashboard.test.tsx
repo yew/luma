@@ -141,6 +141,28 @@ describe('GitHub connection lifecycle', () => {
     expect((screen.getByRole('button', { name: 'Connect GitHub' }) as HTMLButtonElement).disabled).toBe(true);
     expect(bridge.invoke).not.toHaveBeenCalled();
   });
+  it('offers account-scoped history deletion after disconnect without changing another account', async () => {
+    bridge.invoke.mockImplementation(async command => {
+      if (command === 'github_status') return connected();
+      if (command === 'github_disconnect') return disconnected(10);
+      return 1;
+    });
+    render(<GitHubUsage/>); await flush();
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect' })); await flush();
+    expect(screen.getByRole('group', { name: 'Disconnected account history' })).toBeTruthy();
+    expect(bridge.invoke.mock.calls.some(([name]) => name === 'clear_usage_history')).toBe(false);
+    act(() => bridge.listener?.({ payload: {...connected(11),account:{id:43,login:'account-b'}} }));
+    fireEvent.click(screen.getByRole('button', {name:'Delete disconnected account history'}));await flush();
+    expect(bridge.invoke).toHaveBeenCalledWith('clear_usage_history', {account:{provider:'github_copilot',host:'api.github.com',account_id:'42'}});
+  });
+  it('keeps history when selected after disconnect', async () => {
+    bridge.invoke.mockImplementation(async command => command === 'github_disconnect' ? disconnected(10) : connected());
+    render(<GitHubUsage/>);await flush();
+    fireEvent.click(screen.getByRole('button', {name:'Disconnect'}));await flush();
+    fireEvent.click(screen.getByRole('button', {name:'Keep history'}));await flush();
+    expect(bridge.invoke.mock.calls.some(([name]) => name === 'clear_usage_history')).toBe(false);
+    expect(screen.queryByRole('group', {name:'Disconnected account history'})).toBeNull();
+  });
   it('preserves usage on a failed refresh and switches to the new account deadline', async () => {
     let current = connected();
     bridge.invoke.mockImplementation(async command => {

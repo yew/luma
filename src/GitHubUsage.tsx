@@ -13,6 +13,8 @@ const number = (value: number|null) => value == null ? 'Unknown' : value.toLocal
 
 export function GitHubUsage({ onStatus, refreshIntervalSeconds = 300 }: { onStatus?: (status: Auth) => void; refreshIntervalSeconds?: number }) {
   const [auth, setAuth] = useState<Auth|null>(null);
+  const [disconnectedAccount, setDisconnectedAccount] = useState<Auth['account']>(null);
+  const [deletingHistory, setDeletingHistory] = useState(false);
   const [device, setDevice] = useState<Device|null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -115,8 +117,19 @@ export function GitHubUsage({ onStatus, refreshIntervalSeconds = 300 }: { onStat
   async function cancel() { clearPoll(); setDevice(null); setBusy(false); try { await invoke('github_cancel'); applyStatus(await invoke<Auth>('github_status')); } catch (error) { setError(errorMessage(error)); } }
   async function disconnect() {
     clearPoll(); setDevice(null); setBusy(true);
-    try { applyStatus(await invoke<Auth>('github_disconnect')); }
+    const previousAccount = auth?.account;
+    try { applyStatus(await invoke<Auth>('github_disconnect')); if (previousAccount) setDisconnectedAccount(previousAccount); }
     catch (error) { setError(errorMessage(error)); } finally { setBusy(false); }
+  }
+  async function deleteDisconnectedHistory() {
+    const account = disconnectedAccount;
+    if (!account) return;
+    setDeletingHistory(true);
+    try {
+      await invoke('clear_usage_history', { account: { provider: 'github_copilot', host: 'api.github.com', account_id: String(account.id) } });
+      setDisconnectedAccount(null);
+    } catch { setError('Unable to delete saved usage history. You can retry.'); }
+    finally { setDeletingHistory(false); }
   }
   const snapshot = auth?.snapshot;
   return <article className="usage-card">
@@ -129,6 +142,11 @@ export function GitHubUsage({ onStatus, refreshIntervalSeconds = 300 }: { onStat
     </>}
     {!snapshot && !device && <div className="empty"><p>{!auth && !error ? 'Loading GitHub connection…' : 'Your usage, at a glance.'}</p><p className="muted">{isTauri() ? 'Sign in securely through GitHub.' : 'Open the desktop app to connect GitHub.'}</p></div>}
     {device && <div className="device-auth"><p>Enter this code on GitHub:</p><strong>{device.user_code}</strong><button className="primary-button" onClick={() => void invoke('open_github_verification').catch(error => setError(errorMessage(error)))}>Open GitHub</button><p className="muted">Waiting for authorization…</p><button className="text-button" onClick={cancel}>Cancel sign-in</button></div>}
+    {disconnectedAccount && <div className="notice" role="group" aria-label="Disconnected account history">
+      <p>Disconnected {disconnectedAccount.login}. Keep this account’s saved usage history, or permanently delete it from Luma?</p>
+      <button className="text-button" disabled={deletingHistory} onClick={() => setDisconnectedAccount(null)}>Keep history</button>{' '}
+      <button className="text-button" disabled={deletingHistory} onClick={() => void deleteDisconnectedHistory()}>{deletingHistory ? 'Deleting…' : 'Delete disconnected account history'}</button>
+    </div>}
     {error && <p role="status" className="notice">{error}</p>}
     {!device && <div className="usage-actions">
       {auth?.state === 'connected' ? <><button className="text-button" disabled={busy || !refreshReady} onClick={() => void refresh()}>{busy ? 'Refreshing…' : !refreshReady ? 'Retry in ' + retrySeconds + 's' : 'Refresh'}</button><button className="text-button" disabled={busy} onClick={begin}>Switch account</button><button className="text-button" disabled={busy} onClick={disconnect}>Disconnect</button></> : <button className="primary-button" disabled={!isTauri() || busy} onClick={begin}>{busy ? 'Connecting…' : 'Connect GitHub'}</button>}

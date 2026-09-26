@@ -51,9 +51,13 @@ This also reconciles orphan records created by older Luma builds. Typical remova
 
 Rust tests cover normalization, configuration merge/install/remove and malformed-file preservation, decimal-free metadata persistence, state ordering/dedup, parallel waits, restart, retention, and concurrent SQLite reads. UI tests cover status ordering/privacy and explicit setup/removal/deletion. A native executable smoke test injects synthetic stdin events into a temporary database and verifies running → waiting → running → stopped plus cancellation, disabled collection, malformed input, and no prompt/body retention.
 
-Validation currently passes 73 Rust tests, 24 UI component tests, eight Node tests, frontend build, strict clippy, and plan lint.
+Final repair validation passes 84 Rust tests, 27 UI component tests, eight Node tests, frontend build, strict clippy, and plan lint.
 
 These automated/synthetic checks do not establish that the current Codex desktop has loaded and trusted the handlers. The user subsequently verified real macOS Waiting and Turn stopped, with Waiting also observed through the installed database and Accessibility tree. See the macOS acceptance report. Windows is deferred; final-success/failure classification is outside the approved five-state MVP. AC1/AC6 are not marked complete from fixtures. The official reference is [Codex Hooks](https://developers.openai.com/codex/hooks); the installed protocol schema confirms all eight event names and command handler fields.
+
+## Historical App Server Investigation
+
+The following investigation predates the implemented Hooks route and is retained for reference. It is not an outstanding P0 blocker for the approved five-state macOS MVP; current acceptance is recorded above and in the macOS report.
 
 ## Local Evidence
 
@@ -84,14 +88,14 @@ Prefer a supported, accessible connection to the server that actually owns the m
 
 For session-file fallback, incrementally parse supported structured event envelopes and retain only identifiers, timestamps, project/title metadata, and normalized status. Handle partial lines, truncation/rotation, duplicates, version changes, and initial reconciliation. Do not copy conversation bodies. Validate the exact task/turn identifiers and completion semantics before mapping `task_started` / `task_complete`. File silence and process presence never prove completion or waiting.
 
-Waiting-state support is still unverified for existing desktop sessions. Do not substitute heuristic waiting detection, report full P0 success, or silently reduce the approved scope. Local JSONL evidence currently establishes candidate start/end signals only.
+Waiting-state support was unverified during this earlier investigation. Do not substitute heuristic waiting detection, report full P0 success, or silently reduce the approved scope. Local JSONL evidence currently establishes candidate start/end signals only.
 
-## Remaining P0 Checks
+## Historical P0 Checklist (Superseded by Hooks Acceptance)
 
 1. Identify a supported observation transport for the user's existing Codex sessions, or demonstrate sufficient versioned session events without requiring additional helpers.
 2. Observe an actual running → waiting for input/approval → resumed → completed sequence in a user-controlled Codex task. Do not generate a new billable task or approve an action merely for this test.
 3. Validate current-turn identity, ordering, reconnect, multiple simultaneous sessions, failure/interruption, and unavailable-source behavior. Use sanitized protocol fixtures for repeatable parser checks.
-4. Record supported Codex versions and macOS/Windows differences. Keep AC1 and Step 1 incomplete until the required live sequence is verified.
+4. Record supported Codex versions and macOS/Windows differences. This was the pre-Hooks acceptance requirement; current macOS five-state acceptance supersedes it.
 
 ## Extended Observer Investigation
 
@@ -99,9 +103,9 @@ A bounded independent inspection found no named Unix listener or TCP listener on
 
 Three recent session files confirmed start/end events without a waiting/approval event type. Completion records omit `error` on sampled successful runs and include an error object on a sampled failed run. This is version-specific local evidence, not a universal file-format guarantee.
 
-The development diagnostic in `tools/inspect-codex-events.mjs` projects only turn ID, timestamp, event type, and normalized status internally; output contains aggregate counts and last recorded status only. It never promotes file silence to live status. Tests cover content stripping, explicit start/end transitions, stale/duplicate events, old-run completions, malformed input, and terminal evidence without a captured start. Production incremental reading, live observation, and waiting/resume validation remain pending.
+The development diagnostic in `tools/inspect-codex-events.mjs` projects only turn ID, timestamp, event type, and normalized status internally; output contains aggregate counts and last recorded status only. It never promotes file silence to live status. Tests cover content stripping, explicit start/end transitions, stale/duplicate events, old-run completions, malformed input, and terminal evidence without a captured start. Production file reading was not pursued; subsequent Hooks delivery and waiting/response/stopped validation supersede this exploratory diagnostic.
 
-P0 cannot yet satisfy waiting-state acceptance for existing desktop conversations. The approved plan allows independent desktop foundation work while this dependency remains unresolved; neither P0 nor the full MVP is marked complete.
+This earlier App Server route could not satisfy waiting-state acceptance for existing desktop conversations. The approved plan allows independent desktop foundation work while this dependency remains unresolved; neither P0 nor the full MVP is marked complete.
 
 ## Official Documentation Recheck
 
@@ -116,4 +120,4 @@ A further bounded read-only check on 2026-09-26 kept the same installed CLI base
 - The [official App Server documentation](https://developers.openai.com/codex/app-server) confirms that `thread/read` reads without resuming and returns runtime status. It documents stdio, Unix sockets, disabled local transport, and experimental/unsupported TCP WebSocket transport. It does not establish a discovery mechanism for an already running desktop server using unnamed socket pairs. The [official CLI reference](https://developers.openai.com/codex/cli/reference) describes explicit remote endpoints rather than discovering that desktop transport.
 - A schema-only read of the installed `state_5.sqlite` found no persisted runtime-status, waiting-state, or current-turn-status column on `threads`, and no dedicated turn/status/event table. The similarly named `thread_spawn_edges.status` is not a verified conversation status source; the inspected aggregate contained only `open`. No thread rows, prompts, previews, credentials, or conversation bodies were selected or copied. SQLite was opened in read-only mode with `query_only` enabled.
 
-These checks confirm that local metadata storage does not close the waiting-state gap for this installed version. Future work needs an accessible supported endpoint owned by the existing desktop sessions, or a validated structured event source that includes waiting and resume transitions. Do not implement a production database-status guess, automatically start a daemon, change Codex configuration, or connect to private desktop IPC to bypass this dependency. P0 and AC1 remain incomplete.
+These checks confirm that local metadata storage does not close the waiting-state gap for this installed version. Future work needs an accessible supported endpoint owned by the existing desktop sessions, or a validated structured event source that includes waiting and resume transitions. Do not implement a production database-status guess, automatically start a daemon, change Codex configuration, or connect to private desktop IPC to bypass this dependency. At the time of this App Server investigation, P0/AC1 were incomplete; later Hooks acceptance supersedes that blocker.

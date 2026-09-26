@@ -137,7 +137,7 @@ pub struct CodexService {
     manifest: PathBuf,
     config_path: PathBuf,
     install_lock: Mutex<()>,
-    snapshot_lock: Mutex<()>,
+    snapshot_lock: Mutex<bool>,
     reconciliation: Mutex<crate::codex_reconcile::Reconciler>,
 }
 #[derive(Serialize, Deserialize)]
@@ -169,7 +169,7 @@ impl CodexService {
             manifest: data.join("codex-hook-install.json"),
             config_path: codex_home.join("hooks.json"),
             install_lock: Mutex::new(()),
-            snapshot_lock: Mutex::new(()),
+            snapshot_lock: Mutex::new(false),
             reconciliation: Mutex::new(crate::codex_reconcile::Reconciler::default()),
         })
     }
@@ -237,23 +237,48 @@ impl CodexService {
         let _ = self.store.prune_expired(now());
     }
     pub fn status(&self) -> CodexStatus {
-        let _snapshot = self
+        let mut invalidation_pending = self
             .snapshot_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let installed = self.installed();
         let enabled = self.store.enabled();
-        let sessions = self.store.snapshot(now());
-        let error = if installed.is_err() || enabled.is_err() || sessions.is_err() {
-            Some(failure())
+        let unavailable = !matches!(installed, Ok(true)) || !matches!(enabled, Ok(true));
+        *invalidation_pending |= unavailable;
+        let invalidation_failed = if *invalidation_pending {
+            match self.store.invalidate_source() {
+                Ok(()) => {
+                    *invalidation_pending = false;
+                    false
+                }
+                Err(_) => true,
+            }
         } else {
-            None
+            false
         };
+        let sessions = self.store.snapshot(now());
+        let error =
+            if installed.is_err() || enabled.is_err() || sessions.is_err() || invalidation_failed {
+                Some(failure())
+            } else {
+                None
+            };
+        let mut sessions = sessions.unwrap_or_default();
+        if unavailable || invalidation_failed {
+            // Also mask concurrent hook writes and failed database updates.
+            for session in &mut sessions {
+                if matches!(session.status.as_str(), "running" | "waiting") {
+                    session.status = "unknown".into();
+                    session.detail =
+                        "Monitoring unavailable; waiting for a fresh runtime hook.".into();
+                }
+            }
+        }
         CodexStatus {
             revision: REVISION.fetch_add(1, Ordering::Relaxed),
             installed: installed.unwrap_or(false),
             enabled: enabled.unwrap_or(false),
-            sessions: sessions.unwrap_or_default(),
+            sessions,
             error,
         }
     }
@@ -521,7 +546,7 @@ mod tests {
             manifest: root.join("manifest.json"),
             config_path: root.join("hooks.json"),
             install_lock: Mutex::new(()),
-            snapshot_lock: Mutex::new(()),
+            snapshot_lock: Mutex::new(false),
             reconciliation: Mutex::new(crate::codex_reconcile::Reconciler::default()),
         };
         let original = json!({"description":"User preferences","hooks":{"Stop":[{"hooks":[{"type":"command","command":"user-handler"}]}]}});
@@ -551,6 +576,133 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn lost_hooks_stay_unknown_after_repair_until_fresh_evidence() {
+        for corrupt in [false, true] {
+            let root =
+                std::env::temp_dir().join(format!("luma-hook-lost-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&root).unwrap();
+            let service = CodexService {
+                store: CodexStore::open(root.join("codex-hooks.sqlite3")).unwrap(),
+                db_path: root.join("codex-hooks.sqlite3"),
+                manifest: root.join("manifest.json"),
+                config_path: root.join("hooks.json"),
+                install_lock: Mutex::new(()),
+                snapshot_lock: Mutex::new(false),
+                reconciliation: Mutex::new(crate::codex_reconcile::Reconciler::default()),
+            };
+            service.enable().unwrap();
+            let config = fs::read(&service.config_path).unwrap();
+            let time = now();
+            for (id, kind) in [
+                ("waiting", "PermissionRequest"),
+                ("running", "UserPromptSubmit"),
+                ("stopped", "Stop"),
+                ("canceled", "Interrupt"),
+            ] {
+                service
+                    .store
+                    .append(HookEvent {
+                        event_id: format!("{id}-1"),
+                        session_id: id.into(),
+                        turn_id: Some("turn".into()),
+                        kind: kind.into(),
+                        tool_name: Some("shell".into()),
+                        tool_use_id: Some("tool".into()),
+                        project: None,
+                        received_at: time,
+                    })
+                    .unwrap();
+            }
+            assert!(service
+                .status()
+                .sessions
+                .iter()
+                .any(|s| s.status == "waiting"));
+            if corrupt {
+                fs::write(&service.config_path, b"invalid json").unwrap();
+            } else {
+                fs::remove_file(&service.config_path).unwrap();
+            }
+            // Simulate a readable store whose projection updates fail. Responses
+            // must stay safe even if the file is repaired before storage recovers.
+            let database = rusqlite::Connection::open(&service.db_path).unwrap();
+            database.execute_batch("CREATE TRIGGER reject_invalidation BEFORE UPDATE ON codex_sessions BEGIN SELECT RAISE(ABORT, 'test write failure'); END;").unwrap();
+            let failed = service.status();
+            assert!(failed.error.is_some());
+            assert!(failed
+                .sessions
+                .iter()
+                .all(|s| !matches!(s.status.as_str(), "running" | "waiting")));
+            fs::write(&service.config_path, &config).unwrap();
+            let repaired_but_unpersisted = service.status();
+            assert!(repaired_but_unpersisted.installed);
+            assert!(repaired_but_unpersisted.error.is_some());
+            assert!(repaired_but_unpersisted
+                .sessions
+                .iter()
+                .all(|s| !matches!(s.status.as_str(), "running" | "waiting")));
+            database
+                .execute_batch("DROP TRIGGER reject_invalidation;")
+                .unwrap();
+            // Persistence recovery must not revive the old evidence.
+            assert!(service
+                .status()
+                .sessions
+                .iter()
+                .all(|s| !matches!(s.status.as_str(), "running" | "waiting")));
+            if corrupt {
+                fs::write(&service.config_path, b"invalid json").unwrap();
+            } else {
+                fs::remove_file(&service.config_path).unwrap();
+            }
+            let disconnected = service.status();
+            assert!(!disconnected.installed);
+            assert!(disconnected.enabled);
+            assert_eq!(disconnected.error.is_some(), corrupt);
+            fs::write(&service.config_path, &config).unwrap();
+            for status in [disconnected, service.status()] {
+                assert_eq!(status.sessions.len(), 4);
+                for session in status.sessions {
+                    assert_eq!(session.last_activity, time);
+                    assert_eq!(
+                        session.status,
+                        match session.session_id.as_str() {
+                            "stopped" => "stopped",
+                            "canceled" => "canceled",
+                            _ => "unknown",
+                        }
+                    );
+                }
+            }
+            service
+                .store
+                .append(HookEvent {
+                    event_id: "fresh".into(),
+                    session_id: "waiting".into(),
+                    turn_id: Some("turn".into()),
+                    kind: "PermissionRequest".into(),
+                    tool_name: Some("shell".into()),
+                    tool_use_id: Some("new-tool".into()),
+                    project: None,
+                    received_at: time + 1,
+                })
+                .unwrap();
+            assert_eq!(
+                service
+                    .status()
+                    .sessions
+                    .iter()
+                    .find(|s| s.session_id == "waiting")
+                    .unwrap()
+                    .status,
+                "waiting"
+            );
+            drop(database);
+            drop(service);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[test]
     fn malformed_existing_config_is_not_overwritten_or_enabled() {
         let root = std::env::temp_dir().join(format!("luma-hook-bad-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
@@ -561,7 +713,7 @@ mod tests {
             manifest: root.join("manifest.json"),
             config_path: root.join("hooks.json"),
             install_lock: Mutex::new(()),
-            snapshot_lock: Mutex::new(()),
+            snapshot_lock: Mutex::new(false),
             reconciliation: Mutex::new(crate::codex_reconcile::Reconciler::default()),
         };
         fs::write(&service.config_path, b"user's invalid json").unwrap();
